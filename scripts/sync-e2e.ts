@@ -11,17 +11,24 @@
 //                                                point settings.json at the hub, E2E on
 //   bun scripts/sync-e2e.ts backfill [--limit N] queue pre-sync history for upload
 //   bun scripts/sync-e2e.ts status               key, settings and queue counts
+//   bun scripts/sync-e2e.ts verify [--env-file F] [--wrong-key]
+//                                                pull the hub into a throwaway DB and check it decrypts
 //
 // The key lives in <data dir>/sync-e2e.key (0600). Losing every copy makes the
 // hub's data unreadable; `export` output is the backup.
 
 import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, readFileSync } from 'fs';
-import { hostname } from 'os';
+import { createHash } from 'crypto';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { hostname, tmpdir } from 'os';
 import { join } from 'path';
 import { parseArgs } from 'util';
 import { readJsonFileWithBom, writeJsonFileAtomic } from '../src/shared/atomic-json.js';
 import { resolveDataDir } from '../src/shared/paths.js';
+import { SessionStore } from '../src/services/sqlite/SessionStore.js';
+import { configureSyncE2E } from '../src/services/sync/CanonicalContent.js';
+import { SyncApply } from '../src/services/sync/SyncApply.js';
+import { SyncClient } from '../src/services/sync/SyncClient.js';
 import {
   decodeE2EKey,
   E2ECodec,
@@ -144,6 +151,65 @@ function backfill(limit: number): void {
   }
 }
 
+/**
+ * Pull everything from the hub into a throwaway database and report whether it
+ * decrypts. Never touches the real database and never prints secrets.
+ * --wrong-key uses a fresh random key instead: nothing may be applied.
+ */
+async function verify(envFile: string | undefined, wrongKey: boolean): Promise<boolean> {
+  const source = envFile ? readEnvFile(envFile) : (existsSync(settingsPath()) ? readJsonFileWithBom<Record<string, string>>(settingsPath()) : {});
+  const hubUrl = (source.CLAUDE_MEM_CLOUD_SYNC_HUB_URL ?? '').replace(/\/+$/, '');
+  const token = source.CLAUDE_MEM_CLOUD_SYNC_TOKEN ?? '';
+  const userId = source.CLAUDE_MEM_CLOUD_SYNC_USER_ID ?? '';
+  if (!hubUrl || !token || !userId) throw new UsageError('hub URL, token and user id are required (--env-file or settings.json)');
+  const codec = wrongKey ? new E2ECodec(generateE2EKey()) : requireKey();
+  configureSyncE2E(codec);
+
+  // One stable device id per machine, so repeated runs reuse one hub device slot.
+  const deviceId = `verify-${createHash('sha256').update(hostname()).digest('hex').slice(0, 12)}`;
+  const headers = { Authorization: `Bearer ${token}`, 'X-User-Id': userId, 'X-Device-Id': deviceId };
+  const hubRes = await fetch(`${hubUrl}/v1/sync/status`, { headers }).catch((error: Error) => {
+    throw new UsageError(`cannot reach the hub: ${error.message}`);
+  });
+  if (!hubRes.ok) throw new UsageError(`hub status answered HTTP ${hubRes.status}`);
+  const hubHead = ((await hubRes.json()) as { head_seq?: string }).head_seq ?? '0';
+
+  const work = mkdtempSync(join(tmpdir(), 'cmem-sync-verify-'));
+  try {
+    const db = new Database(join(work, 'verify.db'));
+    new SessionStore(db, { syncOpsEnabled: true });
+    const apply = new SyncApply(db, { deviceId });
+    const client = new SyncClient(apply, {
+      hubUrl, token, userId, deviceId, deviceName: 'sync-e2e verify', wsEnabled: false,
+      activePollMs: 3_600_000, idlePollMs: 3_600_000, suspendAfterMs: 3_600_000, minPullGapMs: 0,
+    });
+    let previous = '';
+    for (let i = 0; i < 20 && apply.getCursor() !== previous; i++) {
+      previous = apply.getCursor();
+      await client.pullOnce({ timeoutMs: 180_000, force: true });
+    }
+    client.stop();
+    const count = (t: string) => (db.prepare(`SELECT count(*) AS n FROM ${t}`).get() as { n: number }).n;
+    const counts = { observations: count('observations'), summaries: count('session_summaries'), prompts: count('user_prompts') };
+    const newest = db.prepare('SELECT length(narrative) AS len FROM observations ORDER BY created_at_epoch DESC LIMIT 1').get() as { len: number | null } | null;
+    const cursor = apply.getCursor();
+    db.close();
+
+    console.log(`hub ${hubUrl}: head_seq ${hubHead}; key ${codec.keyId}${wrongKey ? ' (random, --wrong-key)' : ''}`);
+    console.log(`pulled through seq ${cursor}: ${counts.observations} observations, ${counts.summaries} summaries, ${counts.prompts} prompts`);
+    const applied = counts.observations + counts.summaries + counts.prompts;
+    const ok = wrongKey
+      ? applied === 0 && cursor === '0'
+      : applied > 0 && BigInt(cursor) >= BigInt(hubHead) && (newest?.len ?? 0) > 0;
+    console.log(ok
+      ? (wrongKey ? 'OK: a different key applied nothing.' : 'OK: everything on the hub decrypted and applied.')
+      : (wrongKey ? 'FAIL: rows were applied with a different key.' : 'FAIL: the hub could not be fully pulled and decrypted (see the worker log lines above).'));
+    return ok;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 function status(): void {
   const key = readE2EKey();
   console.log(`key: ${key ? `${e2eKeyPath()} (id ${new E2ECodec(key).keyId})` : 'missing'}`);
@@ -172,6 +238,7 @@ async function main(): Promise<void> {
     options: {
       'env-file': { type: 'string' },
       limit: { type: 'string', default: '12000' },
+      'wrong-key': { type: 'boolean', default: false },
     },
   });
   const command = positionals[0];
@@ -186,8 +253,11 @@ async function main(): Promise<void> {
       return backfill(limit);
     }
     case 'status': return status();
+    case 'verify':
+      if (!(await verify(values['env-file'], values['wrong-key']!))) process.exitCode = 1;
+      return;
     default:
-      throw new UsageError('usage: bun scripts/sync-e2e.ts init | export | import | configure --env-file <file> | backfill [--limit N] | status');
+      throw new UsageError('usage: bun scripts/sync-e2e.ts init | export | import | configure --env-file <file> | backfill [--limit N] | status | verify [--env-file <file>] [--wrong-key]');
   }
 }
 
