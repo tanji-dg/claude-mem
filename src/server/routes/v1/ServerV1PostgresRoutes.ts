@@ -178,6 +178,20 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     if (tokenCap > 0) writeGuards.push(requireMonthlyQuota(this.options.pool, { kind: 'tokens', cap: tokenCap }));
     const writeAuth: RequestHandler[] = [baseWrite, ...writeGuards];
     const readAuth: RequestHandler[] = [baseRead, ...guards];
+    // Routes the hooks client and MCP clients call with an installer-issued key
+    // (HOOK_API_KEY_SCOPES) also accept that route's narrower installer scope.
+    // Same table as workers/cmem-server/src/auth.ts ROUTE_SCOPES. Everything
+    // else (keys, deletes, job retry/cancel, …) still needs memories:*.
+    const withAlias = (requiredScope: string, aliasScope: string) => requirePostgresServerAuth(this.options.pool, {
+      authMode: this.options.authMode,
+      allowLocalDevBypass: this.options.allowLocalDevBypass,
+      requiredScopes: [requiredScope],
+      aliasScope,
+    });
+    const sessionsWriteAuth: RequestHandler[] = [withAlias('memories:write', 'sessions:write'), ...writeGuards];
+    const eventsWriteAuth: RequestHandler[] = [withAlias('memories:write', 'events:write'), ...writeGuards];
+    const observationsReadAuth: RequestHandler[] = [withAlias('memories:read', 'observations:read'), ...guards];
+    const jobsReadAuth: RequestHandler[] = [withAlias('memories:read', 'jobs:read'), ...guards];
 
     // GET /v1/usage — per-kind usage totals for the caller's team this month.
     app.get('/v1/usage', readAuth, this.asyncHandler(async (req, res) => {
@@ -241,7 +255,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     }));
 
     // POST /v1/events — single event with optional async generation
-    app.post('/v1/events', writeAuth, this.asyncHandler(async (req, res) => {
+    app.post('/v1/events', eventsWriteAuth, this.asyncHandler(async (req, res) => {
       const parsedQuery = EVENT_QUERY_SCHEMA.safeParse(req.query);
       if (!parsedQuery.success) {
         res.status(400).json({ error: 'ValidationError', issues: parsedQuery.error.issues });
@@ -319,7 +333,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     }));
 
     // POST /v1/events/batch — pre-validate, atomic insert, then enqueue
-    app.post('/v1/events/batch', writeAuth, this.asyncHandler(async (req, res) => {
+    app.post('/v1/events/batch', eventsWriteAuth, this.asyncHandler(async (req, res) => {
       const parsedQuery = EVENT_QUERY_SCHEMA.safeParse(req.query);
       if (!parsedQuery.success) {
         res.status(400).json({ error: 'ValidationError', issues: parsedQuery.error.issues });
@@ -661,7 +675,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     }));
 
     // GET /v1/jobs/:id — generation job status, scoped to team/project
-    app.get('/v1/jobs/:id', readAuth, this.asyncHandler(async (req, res) => {
+    app.get('/v1/jobs/:id', jobsReadAuth, this.asyncHandler(async (req, res) => {
       const teamId = this.requireTeamId(req, res);
       if (!teamId) return;
       const id = this.routeParam(req.params.id);
@@ -721,7 +735,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // on platform-scoped external session identity when platformSource is set.
     // Body matches the worker
     // /v1/sessions/start payload but stores into Postgres server_sessions.
-    app.post('/v1/sessions/start', writeAuth, this.handleCreate(
+    app.post('/v1/sessions/start', sessionsWriteAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
         externalSessionId: z.string().min(1).optional(),
@@ -816,7 +830,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // because the (team_id, project_id, source_type='session_summary',
     // source_id) UNIQUE constraint on observation_generation_jobs prevents
     // duplicate rows; the existing row is returned.
-    app.post('/v1/sessions/:id/end', writeAuth, this.asyncHandler(async (req, res) => {
+    app.post('/v1/sessions/:id/end', sessionsWriteAuth, this.asyncHandler(async (req, res) => {
       const teamId = this.requireTeamId(req, res);
       if (!teamId) return;
       const id = this.routeParam(req.params.id);
@@ -870,7 +884,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
 
     // POST /v1/memories — direct/manual observation insertion (compat alias).
     // MUST NOT call generator and MUST NOT create outbox rows.
-    app.post('/v1/memories', writeAuth, this.handleCreate(
+    app.post('/v1/memories', eventsWriteAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
         serverSessionId: z.string().min(1).nullable().optional(),
@@ -926,7 +940,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // tsvector index. Results are ranked by ts_rank desc, then updated_at desc.
     // The MCP `observation_search` tool calls this endpoint via HTTP so the
     // single source of truth for the read path is the REST core.
-    app.post('/v1/search', readAuth, this.handleCreate(
+    app.post('/v1/search', observationsReadAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
         query: z.string().min(1),
@@ -972,7 +986,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // a concatenated context string for direct prompt injection. The MCP
     // `observation_context` tool calls this so MCP and any future REST
     // consumer share the exact same context-packing rule.
-    app.post('/v1/context', readAuth, this.handleCreate(
+    app.post('/v1/context', observationsReadAuth, this.handleCreate(
       z.object({
         projectId: z.string().min(1),
         query: z.string().min(1),
@@ -1024,7 +1038,7 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // (possibly empty). Same readAuth (memories:read) + project scoping +
     // audit trail as POST /v1/context. Contract shared with the Cloudflare
     // worker: GET /v1/context/inject?projectId=<id>&platformSource=<optional>.
-    app.get('/v1/context/inject', readAuth, this.asyncHandler(async (req, res) => {
+    app.get('/v1/context/inject', observationsReadAuth, this.asyncHandler(async (req, res) => {
       const teamId = this.requireTeamId(req, res);
       if (!teamId) return;
       const projectId = typeof req.query.projectId === 'string' ? req.query.projectId.trim() : '';
@@ -1125,8 +1139,8 @@ export class ServerV1PostgresRoutes implements RouteHandler {
     // MCP streamable-HTTP only uses POST (JSON-RPC) and GET (SSE). Scope the
     // route to those instead of app.all, so DELETE/PUT/PATCH/OPTIONS don't run
     // auth + transport only to be rejected.
-    app.post('/v1/mcp', readAuth, mcpHandler);
-    app.get('/v1/mcp', readAuth, mcpHandler);
+    app.post('/v1/mcp', observationsReadAuth, mcpHandler);
+    app.get('/v1/mcp', observationsReadAuth, mcpHandler);
 
     // DELETE /v1/memories/:id — forget a single observation (sources cascade).
     app.delete('/v1/memories/:id', writeAuth, this.asyncHandler(async (req, res) => {

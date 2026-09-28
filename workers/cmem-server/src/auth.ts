@@ -6,13 +6,14 @@
 //   unknown / revoked / expired / missing scope  → 403
 // Scope rule: every required scope must be granted exactly, or "*" is held.
 //
-// Extension over Postgres: installer scope aliases. The server-mode installer
+// Installer scope aliases. The server-mode installer
 // (src/services/hooks/server-bootstrap.ts HOOK_API_KEY_SCOPES) mints keys with
 // events:write / sessions:write / observations:read / jobs:read, while every
-// /v1 route requires memories:write or memories:read — so installer keys get
-// 403 against the Express runtime. Here each route may name the narrower
-// installer scope that is "appropriate" for it (see ROUTE_SCOPES), which then
-// satisfies the canonical requirement for that route only.
+// /v1 route requires memories:write or memories:read. Each route may name the
+// narrower installer scope that is "appropriate" for it (see ROUTE_SCOPES),
+// which then satisfies the canonical requirement for that route only. The
+// Express runtime applies the same table (`aliasScope` in
+// src/server/middleware/postgres-auth.ts).
 
 import { errorResponse } from './http';
 import { AuthRepository } from './storage/auth';

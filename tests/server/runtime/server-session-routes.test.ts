@@ -13,6 +13,7 @@ import {
 import { DisabledServerQueueManager } from '../../../src/server/runtime/types.js';
 import { logger } from '../../../src/utils/logger.js';
 import { quoteIdentifier, newApiKey } from '../../sdk/pg-isolation.js';
+import { HOOK_API_KEY_SCOPES } from '../../../src/services/hooks/server-bootstrap.js';
 
 const testDatabaseUrl = process.env.CLAUDE_MEM_TEST_POSTGRES_URL;
 
@@ -128,6 +129,32 @@ describe('ServerV1PostgresRoutes Phase 6 session endpoints', () => {
       },
     });
   }
+
+  it('installer-scoped keys reach hook routes but not memories:* only routes', async () => {
+    const { raw, hash } = newApiKey();
+    await storage.auth.createApiKey({
+      keyHash: hash,
+      teamId,
+      projectId,
+      actorId: 'test',
+      scopes: [...HOOK_API_KEY_SCOPES],
+    });
+    const installerFetch = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${port}${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${raw}`, 'Content-Type': 'application/json' },
+    });
+
+    const started = await installerFetch('/v1/sessions/start', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, externalSessionId: 'ext-installer' }),
+    });
+    expect(started.status).toBe(201);
+
+    const keys = await installerFetch('/v1/keys', { method: 'POST', body: JSON.stringify({}) });
+    expect(keys.status).toBe(403);
+    const deleted = await installerFetch(`/v1/memories/${crypto.randomUUID()}`, { method: 'DELETE' });
+    expect(deleted.status).toBe(403);
+  });
 
   it('POST /v1/sessions/start is idempotent on legacy no-platform external_session_id', async () => {
     const a = await authedFetch('/v1/sessions/start', {

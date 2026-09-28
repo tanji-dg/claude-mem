@@ -24,6 +24,12 @@ import { logger } from '../../utils/logger.js';
 
 export interface PostgresRequireAuthOptions {
   requiredScopes?: string[];
+  // Installer-issued scope accepted in place of `requiredScopes` on this route
+  // only. The server-mode installer (HOOK_API_KEY_SCOPES in
+  // src/services/hooks/server-bootstrap.ts) mints events:write /
+  // sessions:write / observations:read / jobs:read, never memories:*, so
+  // without this every hook call would be rejected with 403.
+  aliasScope?: string;
   authMode?: string;
   allowLocalDevBypass?: boolean;
   // Local-dev fallback team for unauthenticated loopback requests. This is
@@ -95,7 +101,7 @@ async function authenticatePostgresRequest(
     return;
   }
 
-  const verified = await verifyPostgresApiKey(pool, rawKey, options.requiredScopes ?? []);
+  const verified = await verifyPostgresApiKey(pool, rawKey, options.requiredScopes ?? [], options.aliasScope);
   if (!verified) {
     res.status(403).json({ error: 'Forbidden', message: 'Invalid API key or insufficient scope' });
     return;
@@ -125,6 +131,7 @@ export async function verifyPostgresApiKey(
   pool: PostgresPool,
   rawKey: string,
   requiredScopes: string[],
+  aliasScope?: string,
 ): Promise<VerifiedPostgresApiKey | null> {
   const keyHash = createHash('sha256').update(rawKey).digest('hex');
   const result = await pool.query(
@@ -156,7 +163,7 @@ export async function verifyPostgresApiKey(
     return null;
   }
   const scopes = normalizeScopes(row.scopes);
-  if (!hasRequiredScopes(scopes, requiredScopes)) {
+  if (!hasRequiredScopes(scopes, requiredScopes, aliasScope)) {
     return null;
   }
   return {
@@ -174,8 +181,15 @@ function normalizeScopes(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string');
 }
 
-function hasRequiredScopes(grantedScopes: string[], requiredScopes: string[]): boolean {
+export function hasRequiredScopes(
+  grantedScopes: string[],
+  requiredScopes: string[],
+  aliasScope?: string,
+): boolean {
   if (requiredScopes.length === 0 || grantedScopes.includes('*')) {
+    return true;
+  }
+  if (aliasScope !== undefined && grantedScopes.includes(aliasScope)) {
     return true;
   }
   return requiredScopes.every(scope => grantedScopes.includes(scope));
