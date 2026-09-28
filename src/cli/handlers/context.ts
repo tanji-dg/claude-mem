@@ -24,6 +24,62 @@ import {
   markProFallbackNoticeShown,
   trialDaysRemaining,
 } from '../../shared/cmem-gateway.js';
+import {
+  resolveRuntimeContext as defaultResolveRuntimeContext,
+  logServerFallback as defaultLogServerFallback,
+  type ServerRuntimeContext,
+} from '../../services/hooks/runtime-selector.js';
+import { isServerClientError } from '../../services/hooks/server-client.js';
+
+const defaultDependencies = {
+  resolveRuntimeContext: defaultResolveRuntimeContext,
+  logServerFallback: defaultLogServerFallback,
+};
+
+let dependencies = defaultDependencies;
+
+export function setContextDependenciesForTesting(
+  overrides: Partial<typeof defaultDependencies> = {},
+): void {
+  dependencies = { ...defaultDependencies, ...overrides };
+}
+
+const SERVER_CONTEXT_INJECT_ROUTE = '/v1/context/inject';
+
+type ServerContextOutcome =
+  | { kind: 'ok'; context: string }
+  | { kind: 'fallback' }
+  | { kind: 'failed' };
+
+// Server runtime: memories live on the remote server, not in local SQLite,
+// so the SessionStart timeline must come from GET /v1/context/inject.
+// Transient failures (transport/timeout/5xx/429/missing key) fall back to the
+// local worker; anything else (4xx, bad response) injects nothing.
+async function fetchServerContext(
+  runtime: ServerRuntimeContext,
+  platformSource: string | undefined,
+): Promise<ServerContextOutcome> {
+  try {
+    const context = await runtime.client.contextInject({
+      projectId: runtime.projectId,
+      ...(platformSource ? { platformSource } : {}),
+    });
+    return { kind: 'ok', context: typeof context === 'string' ? context : '' };
+  } catch (error: unknown) {
+    if (isServerClientError(error) && error.isFallbackEligible()) {
+      dependencies.logServerFallback(error.kind, {
+        status: error.status,
+        message: error.message,
+        route: SERVER_CONTEXT_INJECT_ROUTE,
+      });
+      return { kind: 'fallback' };
+    }
+    logger.error('HOOK', 'Server context inject failed (non-recoverable)', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { kind: 'failed' };
+  }
+}
 
 export const contextHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -71,19 +127,36 @@ export const contextHandler: EventHandler = {
     const workerOptions = input.platform === 'codex'
       ? { workerStartupTimeoutMs: HOOK_TIMEOUTS.POST_SPAWN_WAIT, timeoutMs: 2_000 }
       : undefined;
-    const contextResult = await executeWithWorkerFallback<string>(apiPath, 'GET', undefined, workerOptions);
-    if (isWorkerFallback(contextResult)) {
-      return emptyResult;
+
+    let serverMode = false;
+    let additionalContext: string | undefined;
+    const runtime = dependencies.resolveRuntimeContext();
+    if (runtime.runtime === 'server') {
+      const outcome = await fetchServerContext(runtime, normalizedPlatformSource);
+      if (outcome.kind === 'failed') {
+        return emptyResult;
+      }
+      if (outcome.kind === 'ok') {
+        serverMode = true;
+        additionalContext = outcome.context.trim();
+      }
+      // 'fallback' → continue into the local worker path below.
     }
 
-    let additionalContext: string;
-    if (typeof contextResult === 'string') {
-      additionalContext = contextResult.trim();
-    } else if (contextResult === undefined) {
-      additionalContext = '';
-    } else {
-      logger.warn('HOOK', 'Context response was not a string', { type: typeof contextResult });
-      return emptyResult;
+    if (additionalContext === undefined) {
+      const contextResult = await executeWithWorkerFallback<string>(apiPath, 'GET', undefined, workerOptions);
+      if (isWorkerFallback(contextResult)) {
+        return emptyResult;
+      }
+
+      if (typeof contextResult === 'string') {
+        additionalContext = contextResult.trim();
+      } else if (contextResult === undefined) {
+        additionalContext = '';
+      } else {
+        logger.warn('HOOK', 'Context response was not a string', { type: typeof contextResult });
+        return emptyResult;
+      }
     }
 
     // Issue #2215: surface stale OAuth token marker as a session-start hint.
@@ -115,7 +188,9 @@ export const contextHandler: EventHandler = {
     }
 
     let coloredTimeline = '';
-    if (showTerminalOutput) {
+    // The colored timeline is rendered by the local worker from local SQLite;
+    // in server mode that data is not the injected memory, so skip it.
+    if (showTerminalOutput && !serverMode) {
       const colorResult = await executeWithWorkerFallback<string>(colorApiPath, 'GET', undefined, workerOptions);
       if (!isWorkerFallback(colorResult) && typeof colorResult === 'string') {
         coloredTimeline = colorResult.trim();
@@ -128,7 +203,9 @@ export const contextHandler: EventHandler = {
     // MCP-context-fetch platform like Codex — colorApiPath never populates
     // coloredTimeline for it (colors are claude-code-only above), so fall
     // back to the plain additionalContext for terminal display.
-    const displayContent = coloredTimeline || (platform === 'antigravity-cli' ? additionalContext : '');
+    // Server mode has no colored variant, so show the plain server timeline.
+    const displayContent = coloredTimeline
+      || (platform === 'antigravity-cli' || serverMode ? additionalContext : '');
 
     // Days-remaining nicety: while the free trial is active (plan 'trial', an
     // end date stored, no fallback), append the countdown. Computed locally —
@@ -140,8 +217,11 @@ export const contextHandler: EventHandler = {
       ? `claude-mem free trial: ${daysLeft} day${daysLeft === 1 ? '' : 's'} left`
       : null;
 
+    // The live viewer is served by the local worker, which does not hold
+    // server-mode memories — only advertise it in worker mode.
+    const viewerLine = serverMode ? '' : `View Observations Live @ http://localhost:${port}\n`;
     const systemMessage = showTerminalOutput && displayContent
-      ? `${displayContent}\n\nView Observations Live @ http://localhost:${port}\n${proTrialLine('session-start')}${trialDaysLine ? `\n${trialDaysLine}` : ''}`
+      ? `${displayContent}\n\n${viewerLine}${proTrialLine('session-start')}${trialDaysLine ? `\n${trialDaysLine}` : ''}`
       : undefined;
 
     return {

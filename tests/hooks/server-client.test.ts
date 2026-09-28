@@ -342,3 +342,69 @@ describe('ServerClient', () => {
     });
   });
 });
+
+describe('ServerClient.contextInject', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('GETs /v1/context/inject with projectId, normalized platformSource and Bearer auth', async () => {
+    installFetch(() => new Response('# [p] recent context\n- item\n', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    }));
+    const client = new ServerClient({ serverBaseUrl: 'http://srv.test/', apiKey: 'cm_key' });
+    const text = await client.contextInject({ projectId: 'proj 1', platformSource: 'Claude Code' });
+    expect(text).toBe('# [p] recent context\n- item\n');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].method).toBe('GET');
+    expect(captured[0].url).toBe('http://srv.test/v1/context/inject?projectId=proj+1&platformSource=claude');
+    expect(captured[0].headers.authorization).toBe('Bearer cm_key');
+    expect(captured[0].headers.accept).toBe('text/plain');
+    expect(captured[0].body).toBeUndefined();
+  });
+
+  it('omits platformSource when not provided and returns empty string for empty body', async () => {
+    installFetch(() => new Response('', { status: 200 }));
+    const client = new ServerClient({ serverBaseUrl: 'http://srv.test', apiKey: 'k' });
+    const text = await client.contextInject({ projectId: 'p1' });
+    expect(text).toBe('');
+    expect(captured[0].url).toBe('http://srv.test/v1/context/inject?projectId=p1');
+  });
+
+  it('does not attempt to JSON-parse text/plain markdown', async () => {
+    installFetch(() => new Response('not { json', { status: 200 }));
+    const client = new ServerClient({ serverBaseUrl: 'http://srv.test', apiKey: 'k' });
+    expect(await client.contextInject({ projectId: 'p1' })).toBe('not { json');
+  });
+
+  it('classifies 5xx/429 as fallback-eligible and 403 as not', async () => {
+    const client = new ServerClient({ serverBaseUrl: 'http://srv.test', apiKey: 'k' });
+    for (const [status, eligible] of [[503, true], [429, true], [403, false], [404, false]] as const) {
+      installFetch(() => new Response('err', { status }));
+      let caught: unknown;
+      try {
+        await client.contextInject({ projectId: 'p1' });
+      } catch (error) {
+        caught = error;
+      }
+      expect(isServerClientError(caught)).toBe(true);
+      expect((caught as ServerClientError).kind).toBe('http_error');
+      expect((caught as ServerClientError).status).toBe(status);
+      expect((caught as ServerClientError).isFallbackEligible()).toBe(eligible);
+    }
+  });
+
+  it('classifies transport failures and missing API key as fallback-eligible', async () => {
+    installFetch(() => { throw new Error('ECONNREFUSED'); });
+    const client = new ServerClient({ serverBaseUrl: 'http://srv.test', apiKey: 'k' });
+    const transportErr = await client.contextInject({ projectId: 'p1' }).catch(e => e);
+    expect((transportErr as ServerClientError).kind).toBe('transport');
+    expect((transportErr as ServerClientError).isFallbackEligible()).toBe(true);
+
+    const noKey = new ServerClient({ serverBaseUrl: 'http://srv.test', apiKey: '' });
+    const keyErr = await noKey.contextInject({ projectId: 'p1' }).catch(e => e);
+    expect((keyErr as ServerClientError).kind).toBe('missing_api_key');
+    expect((keyErr as ServerClientError).isFallbackEligible()).toBe(true);
+  });
+});

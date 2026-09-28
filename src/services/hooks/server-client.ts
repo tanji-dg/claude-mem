@@ -190,6 +190,13 @@ export interface ServerContextObservationsResponse {
   context: string;
 }
 
+// SessionStart context injection. Server renders a compact markdown timeline
+// of recent project memories and returns it as `text/plain` (possibly empty).
+export interface ServerContextInjectRequest {
+  projectId: string;
+  platformSource?: string | null;
+}
+
 // Phase 8 — generation job status, scoped by api-key team/project.
 export interface ServerJobStatusResponse {
   generationJob: {
@@ -268,6 +275,23 @@ export class ServerClient {
       '/v1/context',
       this.buildSearchPayload(input),
     );
+  }
+
+  // SessionStart context injection: `GET /v1/context/inject` returns a
+  // markdown string (text/plain) built from recent server-side memories.
+  // An empty body is a valid "nothing to inject" answer.
+  async contextInject(input: ServerContextInjectRequest): Promise<string> {
+    if (!input.projectId) {
+      throw new ServerClientError('invalid_response', 'projectId is required for contextInject');
+    }
+    const params = new URLSearchParams({ projectId: input.projectId });
+    const platformSource = typeof input.platformSource === 'string'
+      ? normalizePlatformSource(input.platformSource)
+      : '';
+    if (platformSource) params.set('platformSource', platformSource);
+    return this.requestText('GET', `/v1/context/inject?${params.toString()}`, undefined, {
+      accept: 'text/plain',
+    });
   }
 
   // Phase 8 — MCP `observation_generation_status`. Server returns the same
@@ -353,6 +377,32 @@ export class ServerClient {
     path: string,
     body?: unknown,
   ): Promise<T> {
+    const text = await this.requestText(method, path, body);
+    if (!text || text.length === 0) {
+      // Endpoints we call always return JSON; a body-less success is unusual
+      // but not fatal — return undefined-shaped object.
+      return {} as T;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      throw new ServerClientError(
+        'invalid_response',
+        `Server ${method} ${path} returned non-JSON response`,
+        { cause: err },
+      );
+    }
+  }
+
+  // Shared transport: auth, timeout, and error classification. Returns the
+  // raw response body so JSON and text/plain endpoints share one code path.
+  private async requestText(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+    options: { accept?: string } = {},
+  ): Promise<string> {
     if (!this.apiKey || !this.apiKey.trim()) {
       throw new ServerClientError(
         'missing_api_key',
@@ -361,13 +411,12 @@ export class ServerClient {
     }
 
     const url = `${this.baseUrl}${path}`;
-    const init: RequestInit = {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.apiKey}`,
     };
+    if (options.accept) headers.Accept = options.accept;
+    const init: RequestInit = { method, headers };
     if (body !== undefined) {
       init.body = JSON.stringify(body);
     }
@@ -394,20 +443,14 @@ export class ServerClient {
       );
     }
 
-    const text = await response.text();
-    if (!text || text.length === 0) {
-      // Endpoints we call always return JSON; a body-less success is unusual
-      // but not fatal — return undefined-shaped object.
-      return {} as T;
-    }
     try {
-      return JSON.parse(text) as T;
+      return await response.text();
     } catch (error: unknown) {
-      const err = error instanceof Error ? error : new Error(String(error));
+      const message = error instanceof Error ? error.message : String(error);
       throw new ServerClientError(
-        'invalid_response',
-        `Server ${method} ${path} returned non-JSON response`,
-        { cause: err },
+        'transport',
+        `Server ${method} ${path} body read failed: ${message}`,
+        { cause: error },
       );
     }
   }

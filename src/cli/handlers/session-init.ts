@@ -85,12 +85,9 @@ export const sessionInitHandler: EventHandler = {
     // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
     // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
     if (runtime.runtime === 'server') {
+      let serverSessionStarted = true;
       try {
         await startServerSession(runtime, input, sessionId, platformSource, project, prompt);
-        // Server does not currently support the same context-injection
-        // protocol as the worker. Skip semantic injection in server mode
-        // until the server context endpoint exists.
-        return { continue: true, suppressOutput: true };
       } catch (error: unknown) {
         if (isServerClientError(error) && error.isFallbackEligible()) {
           dependencies.logServerFallback(error.kind, {
@@ -98,7 +95,7 @@ export const sessionInitHandler: EventHandler = {
             message: error.message,
             route: '/v1/sessions/start',
           });
-          // fall through to worker fallback
+          serverSessionStarted = false;
         } else {
           logger.error('HOOK', 'Server session-start failed (non-recoverable)', {
             error: error instanceof Error ? error.message : String(error),
@@ -106,6 +103,26 @@ export const sessionInitHandler: EventHandler = {
           return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
         }
       }
+      if (serverSessionStarted) {
+        // Semantic injection in server mode goes through POST /v1/context
+        // (same FTS surface as the MCP `observation_context` tool). Fail
+        // open: a context failure must never block the prompt.
+        const additionalContext = semanticInject && shouldSemanticInject(prompt)
+          ? await fetchServerSemanticContext(runtime, prompt, platformSource, settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT)
+          : '';
+        if (additionalContext) {
+          return {
+            continue: true,
+            suppressOutput: true,
+            hookSpecificOutput: {
+              hookEventName: 'UserPromptSubmit',
+              additionalContext,
+            },
+          };
+        }
+        return { continue: true, suppressOutput: true };
+      }
+      // fall through to worker fallback
     }
 
     logger.debug('HOOK', 'session-init: Calling /api/sessions/init', { contentSessionId: sessionId, project });
@@ -149,7 +166,7 @@ export const sessionInitHandler: EventHandler = {
 
     let additionalContext = '';
 
-    if (semanticInject && prompt && prompt.length >= 20 && prompt !== '[media prompt]') {
+    if (semanticInject && shouldSemanticInject(prompt)) {
       const limit = settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT || '5';
       const semanticResult = await dependencies.executeWithWorkerFallback<SemanticContextResponse>(
         '/api/context/semantic',
@@ -205,6 +222,47 @@ async function startServerSession(
     contentSessionId: sessionId,
     project,
   });
+}
+
+function shouldSemanticInject(prompt: string): boolean {
+  return Boolean(prompt) && prompt.length >= 20 && prompt !== '[media prompt]';
+}
+
+async function fetchServerSemanticContext(
+  runtime: ServerRuntimeContext,
+  prompt: string,
+  platformSource: string,
+  rawLimit: string | number | undefined,
+): Promise<string> {
+  try {
+    const response = await runtime.client.contextObservations({
+      projectId: runtime.projectId,
+      query: prompt,
+      // /v1/context caps limit at 50 (zod max).
+      limit: Math.min(parseSemanticInjectLimit(rawLimit ?? '5'), 50),
+      platformSource,
+    });
+    const context = typeof response?.context === 'string' ? response.context : '';
+    if (context) {
+      logger.debug('HOOK', 'Semantic injection (server): observations for prompt', {
+        count: Array.isArray(response.observations) ? response.observations.length : 0,
+      });
+    }
+    return context;
+  } catch (error: unknown) {
+    if (isServerClientError(error) && error.isFallbackEligible()) {
+      dependencies.logServerFallback(error.kind, {
+        status: error.status,
+        message: error.message,
+        route: '/v1/context',
+      });
+    } else {
+      logger.warn('HOOK', 'Server semantic context failed; continuing without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return '';
+  }
 }
 
 function parseSemanticInjectLimit(value: string | number): number {

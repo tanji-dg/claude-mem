@@ -16,7 +16,7 @@ import {
   type PostgresObservationGenerationJob,
 } from '../../../storage/postgres/generation-jobs.js';
 import { PostgresAuthRepository } from '../../../storage/postgres/auth.js';
-import { PostgresObservationRepository } from '../../../storage/postgres/observations.js';
+import { PostgresObservationRepository, type PostgresObservation } from '../../../storage/postgres/observations.js';
 import { PostgresProjectsRepository } from '../../../storage/postgres/projects.js';
 import { logger } from '../../../utils/logger.js';
 import { requirePostgresServerAuth } from '../../middleware/postgres-auth.js';
@@ -1018,6 +1018,53 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         });
       },
     ));
+
+    // SessionStart context injection for server-runtime hooks. Returns a
+    // compact markdown timeline of recent project memories as text/plain
+    // (possibly empty). Same readAuth (memories:read) + project scoping +
+    // audit trail as POST /v1/context. Contract shared with the Cloudflare
+    // worker: GET /v1/context/inject?projectId=<id>&platformSource=<optional>.
+    app.get('/v1/context/inject', readAuth, this.asyncHandler(async (req, res) => {
+      const teamId = this.requireTeamId(req, res);
+      if (!teamId) return;
+      const projectId = typeof req.query.projectId === 'string' ? req.query.projectId.trim() : '';
+      if (!projectId) {
+        res.status(400).json({ error: 'ValidationError', message: 'projectId required' });
+        return;
+      }
+      if (!this.ensureProjectAllowed(req, res, projectId)) return;
+      // listByProject has no platform filter; platformSource is accepted for
+      // contract parity and recorded in the audit row.
+      const platformSource = typeof req.query.platformSource === 'string'
+        ? normalizePlatformSourceOrNull(req.query.platformSource)
+        : null;
+      let rows;
+      let projectName: string | null = null;
+      try {
+        const repo = new PostgresObservationRepository(this.options.pool);
+        rows = await repo.listByProject({ projectId, teamId, limit: CONTEXT_INJECT_LIMIT });
+        if (rows.length > 0) {
+          const project = await new PostgresProjectsRepository(this.options.pool)
+            .getByIdForTeam(projectId, teamId);
+          projectName = project?.name ?? null;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.warn('SYSTEM', 'observation.context_inject failed', { requestId: req.requestId ?? null }, err);
+        this.handleDbError(err, res, 'observation.context_inject');
+        return;
+      }
+      await this.auditWrite(req, 'observation.read', null, projectId, {
+        mode: 'inject',
+        limit: CONTEXT_INJECT_LIMIT,
+        platformSource,
+        resultCount: rows.length,
+        observationIds: rows.map(o => o.id),
+      });
+      res.status(200)
+        .type('text/plain; charset=utf-8')
+        .send(renderContextInjectMarkdown(rows, { projectName: projectName ?? projectId }));
+    }));
 
     // Remote authenticated MCP endpoint. The "secure MCP link" a user pastes
     // into Claude Code (or any MCP client) to recall their cloud memory:
@@ -2136,4 +2183,56 @@ function serializeGenerationJobStatus(
     createdAtEpoch: job.createdAtEpoch,
     updatedAtEpoch: job.updatedAtEpoch,
   };
+}
+
+const CONTEXT_INJECT_LIMIT = 50;
+const CONTEXT_INJECT_SUMMARY_MAX_CHARS = 1500;
+const CONTEXT_INJECT_TITLE_MAX_CHARS = 160;
+
+// Render recent observations (newest first, as listByProject returns them) as
+// the compact SessionStart markdown served by GET /v1/context/inject. The
+// newest `summary`-kind row becomes a "Last session" section; every other
+// row is one dated bullet. No rows → empty string (nothing to inject).
+export function renderContextInjectMarkdown(
+  observations: ReadonlyArray<Pick<PostgresObservation, 'kind' | 'content' | 'metadata' | 'createdAtEpoch'>>,
+  options: { projectName: string; now?: Date },
+): string {
+  if (observations.length === 0) return '';
+  const lastSummary = observations.find(o => o.kind === 'summary' && o.content.trim().length > 0);
+  const bullets = observations
+    .filter(o => o.kind !== 'summary')
+    .map(o => {
+      const title = contextInjectTitle(o);
+      return title ? `- ${formatInjectDate(o.createdAtEpoch)} [${o.kind}] ${title}` : null;
+    })
+    .filter((line): line is string => line !== null);
+
+  const now = options.now ?? new Date();
+  const lines: string[] = [
+    `# [${options.projectName}] recent context (server), ${now.toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+  ];
+  if (lastSummary) {
+    lines.push('', `## Last session (${formatInjectDate(lastSummary.createdAtEpoch)})`, '', truncateInject(lastSummary.content.trim(), CONTEXT_INJECT_SUMMARY_MAX_CHARS));
+  }
+  if (bullets.length > 0) {
+    lines.push('', '## Recent observations', '', ...bullets);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function contextInjectTitle(observation: Pick<PostgresObservation, 'content' | 'metadata'>): string {
+  const metaTitle = observation.metadata && typeof observation.metadata.title === 'string'
+    ? observation.metadata.title.trim()
+    : '';
+  const firstLine = metaTitle || (observation.content.split('\n').find(line => line.trim().length > 0) ?? '').trim();
+  return truncateInject(firstLine.replace(/\s+/g, ' '), CONTEXT_INJECT_TITLE_MAX_CHARS);
+}
+
+function formatInjectDate(epochMs: number): string {
+  const date = new Date(epochMs);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : 'unknown-date';
+}
+
+function truncateInject(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
