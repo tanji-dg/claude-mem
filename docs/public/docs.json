@@ -101,6 +101,7 @@
         "icon": "cloud",
         "pages": [
           "hosted-server",
+          "self-hosting-cloudflare",
           "cloud-sync",
           "cmem-pro-headless"
         ]

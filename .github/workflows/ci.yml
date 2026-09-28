@@ -193,6 +193,47 @@ jobs:
         working-directory: workers/sync-hub
         run: bun run test:ws
 
+  cmem-server:
+    name: cmem-server worker (typecheck · vitest · bundle dry-run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full checkout, not a sparse one: scripts/build.mjs and vitest.config.ts
+      # bundle modules from the repo-root src/ (recall MCP server, schemas,
+      # observation providers, parser) and plugin/modes/*.json (ModeManager
+      # shim), so the Worker cannot build from workers/cmem-server alone.
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Root-level npm install is deliberately skipped: build/aliases.mjs
+      # resolves bare imports from repo-root files against this package's own
+      # node_modules, so the Worker's lockfile is the whole dependency closure.
+      - name: Install cmem-server dependencies
+        working-directory: workers/cmem-server
+        run: bun install --frozen-lockfile
+
+      - name: cmem-server typecheck
+        working-directory: workers/cmem-server
+        run: bunx tsc --noEmit
+
+      - name: cmem-server tests
+        working-directory: workers/cmem-server
+        run: bun run test
+
+      # Runs the real custom build (wrangler.jsonc `build` -> scripts/build.mjs)
+      # and wrangler's bundling/validation, then exits before any upload.
+      # Needs no Cloudflare credentials (verified with CLOUDFLARE_API_TOKEN
+      # unset); dist/ is gitignored in this package.
+      - name: cmem-server bundle (wrangler deploy --dry-run)
+        working-directory: workers/cmem-server
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: bunx wrangler deploy --dry-run --outdir dist/dry-run
+
   sync-api:
     name: sync-api (postgres · protocol v2 · matrix e2e)
     runs-on: ubuntu-latest
