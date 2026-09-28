@@ -131,6 +131,17 @@ curl -sS -X POST "https://cmem-server.<your-subdomain>.workers.dev/v1/admin/boot
 `teamName` and `projectName` are optional and default to `"default"`. Every
 call creates a new team, project and key.
 
+Or do the whole round trip with one command. It generates the admin token,
+sets it as a secret, mints the key, writes the URL, key and project id to
+`~/.cloudflare/cmem-server.env` (mode `0600`, never printed), then deletes the
+admin token again and waits for the route to return `404`:
+
+```bash
+bun run bootstrap:remote --url https://cmem-server.<your-subdomain>.workers.dev
+# --out <file>  --team <name>  --project <name>  --keep-admin-token
+# --no-secret   use CMEM_ADMIN_TOKEN from the environment (e.g. wrangler dev)
+```
+
 ## Configure claude-mem
 
 Edit `~/.claude-mem/settings.json` (flat keys):

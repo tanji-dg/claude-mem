@@ -5,6 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"deploy": "wrangler deploy",
+		"bootstrap:remote": "node scripts/bootstrap-remote.mjs",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest run",
