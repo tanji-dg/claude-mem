@@ -1,0 +1,10 @@
+# Local development overrides for `wrangler dev` (copy to .dev.vars — gitignored).
+# Production values are set with `wrangler secret put <NAME>`.
+
+# Required once to mint the first API key via POST /v1/admin/bootstrap.
+CMEM_ADMIN_TOKEN=local-admin-token-change-me
+
+# Only the key for CLAUDE_MEM_SERVER_PROVIDER (wrangler.jsonc vars) is needed.
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=

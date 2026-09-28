@@ -1,0 +1,53 @@
+/**
+ * cmem-server — claude-mem server runtime (`CLAUDE_MEM_RUNTIME=server`) on
+ * Cloudflare's FREE plan: Workers + D1 + Cron Triggers only (no Queues, KV,
+ * Vectorize or Durable Objects).
+ *
+ * Build: wrangler runs scripts/build.mjs (esbuild + the shared alias config in
+ * build/aliases.mjs, which swaps Node-bound repo modules such as
+ * src/utils/logger.ts for Worker shims) and uploads dist/index.js. Wrangler's
+ * own `alias` is not used because it cannot rewrite relative imports.
+ */
+{
+	"name": "cmem-server",
+	"main": "dist/index.js",
+	"compatibility_date": "2026-07-14",
+	"compatibility_flags": ["nodejs_compat"],
+	"upload_source_maps": true,
+	"build": {
+		"command": "node scripts/build.mjs",
+		"watch_dir": ["src", "../../src"]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "cmem-server",
+			// Replace with the id printed by `wrangler d1 create cmem-server`.
+			// Local dev and vitest use a local simulator and ignore this id.
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+	// Every minute: pick up generation jobs that the request-time waitUntil
+	// missed (isolate eviction, provider errors due for retry, stalled locks).
+	"triggers": {
+		"crons": ["* * * * *"]
+	},
+	"vars": {
+		// LLM provider used for observation generation: claude | gemini | openrouter.
+		// The matching API key is a secret (ANTHROPIC_API_KEY / GEMINI_API_KEY /
+		// OPENROUTER_API_KEY), see src/secrets.d.ts.
+		"CLAUDE_MEM_SERVER_PROVIDER": "claude",
+		// Empty ⇒ the provider's default model.
+		"CLAUDE_MEM_SERVER_MODEL": "",
+		// Empty ⇒ the provider's default output-token cap.
+		"CLAUDE_MEM_SERVER_MAX_OUTPUT_TOKENS": "",
+		// Observation mode (plugin/modes/<mode>.json).
+		"CLAUDE_MEM_MODE": "code"
+	},
+	// Personal-scale traffic (hooks + a 1/min cron) sits far below the Free
+	// plan's Workers Logs allowance, so keep every log line for debugging.
+	"observability": {
+		"enabled": true
+	}
+}
