@@ -200,6 +200,22 @@ export class GenerationJobsRepository {
 		patch: JobTransitionPatch = {},
 	): Promise<ObservationGenerationJob | null> {
 		if (fromStatuses.length === 0) return null;
+		const row = await this.transitionStatement(id, fromStatuses, toStatus, patch).first<JobRow>();
+		return row ? mapJobRow(row) : null;
+	}
+
+	/**
+	 * `transition` as a prepared statement, for db.batch() (e.g. completing the
+	 * job in the same implicit transaction that persists its observations).
+	 * `fromStatuses` must be non-empty.
+	 */
+	transitionStatement(
+		id: string,
+		fromStatuses: readonly ObservationGenerationJobStatus[],
+		toStatus: ObservationGenerationJobStatus,
+		patch: JobTransitionPatch = {},
+	): D1PreparedStatement {
+		if (fromStatuses.length === 0) throw new Error('transitionStatement requires at least one from-status');
 		const sets: string[] = ['status = ?', 'updated_at = ?'];
 		const values: unknown[] = [toStatus, nowMs()];
 		const assign = (column: string, value: unknown): void => {
@@ -217,9 +233,34 @@ export class GenerationJobsRepository {
 		if (patch.lastError !== undefined) assign('last_error', patch.lastError === null ? null : JSON.stringify(patch.lastError));
 		if (patch.payload !== undefined) assign('payload', JSON.stringify(patch.payload));
 		const placeholders = fromStatuses.map(() => '?').join(', ');
-		const row = await this.db
+		return this.db
 			.prepare(`UPDATE observation_generation_jobs SET ${sets.join(', ')} WHERE id = ? AND status IN (${placeholders}) RETURNING *`)
-			.bind(...values, id, ...fromStatuses)
+			.bind(...values, id, ...fromStatuses);
+	}
+
+	/**
+	 * Claim ONE specific job (the request-time fast path, scheduleGeneration):
+	 * same guard as claimDue's `queued` branch, so a job whose retry is not yet
+	 * due, or that has no attempts left, is left for the cron. Returns null when
+	 * the job is not claimable (already taken, not due, terminal, missing).
+	 */
+	async claimById(id: string, now: number, workerId: string): Promise<ObservationGenerationJob | null> {
+		const row = await this.db
+			.prepare(
+				`UPDATE observation_generation_jobs
+				 SET status = 'processing',
+				     attempts = attempts + 1,
+				     locked_at = ?2,
+				     locked_by = ?3,
+				     next_attempt_at = NULL,
+				     updated_at = ?2
+				 WHERE id = ?1
+				   AND status = 'queued'
+				   AND (next_attempt_at IS NULL OR next_attempt_at <= ?2)
+				   AND attempts < max_attempts
+				 RETURNING *`,
+			)
+			.bind(id, now, workerId)
 			.first<JobRow>();
 		return row ? mapJobRow(row) : null;
 	}

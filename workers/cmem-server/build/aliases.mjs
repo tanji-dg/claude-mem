@@ -24,11 +24,12 @@ const pkg = (p) => resolve(PACKAGE_ROOT, p);
  * Repo modules replaced by Worker-safe shims, keyed by the absolute path of
  * the ORIGINAL module (as it resolves on disk). Add an entry to swap another
  * Node-bound module — both bundlers pick it up.
- *
- * Agent C: add `[repo('src/services/domain/ModeManager.ts')]: pkg('src/shims/mode-manager.ts')`.
  */
 export const MODULE_SHIMS = {
 	[repo('src/utils/logger.ts')]: pkg('src/shims/logger.ts'),
+	// fs-based mode loading → static JSON registry (reached from src/sdk/parser.ts
+	// and the providers' prompt-builder).
+	[repo('src/services/domain/ModeManager.ts')]: pkg('src/shims/mode-manager.ts'),
 };
 
 /**
@@ -39,6 +40,17 @@ export const MODULE_SHIMS = {
  */
 export const BARE_ALIASES = {
 	'@claude-mem/recall-mcp-server': repo('src/server/mcp/recall-mcp-server.ts'),
+	// Observation generation (src/generation/*): the three plain-fetch
+	// providers, their prompt builder, the agent-XML parser, the job payload
+	// schema and tag stripping. All reach logger/ModeManager (shimmed above) or
+	// import Postgres/`pg` types, which tsc cannot follow.
+	'@claude-mem/claude-provider': repo('src/server/generation/providers/ClaudeObservationProvider.ts'),
+	'@claude-mem/gemini-provider': repo('src/server/generation/providers/GeminiObservationProvider.ts'),
+	'@claude-mem/openrouter-provider': repo('src/server/generation/providers/OpenRouterObservationProvider.ts'),
+	'@claude-mem/prompt-builder': repo('src/server/generation/providers/shared/prompt-builder.ts'),
+	'@claude-mem/agent-xml-parser': repo('src/sdk/parser.ts'),
+	'@claude-mem/server-job-types': repo('src/server/jobs/types.ts'),
+	'@claude-mem/tag-stripping': repo('src/utils/tag-stripping.ts'),
 };
 
 /**

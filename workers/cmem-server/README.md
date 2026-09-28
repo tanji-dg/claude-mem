@@ -107,9 +107,12 @@ bunx wrangler deploy
 | `CLAUDE_MEM_SERVER_MODEL` | `""` | Empty means the provider's default model |
 | `CLAUDE_MEM_SERVER_MAX_OUTPUT_TOKENS` | `""` | Empty means the provider's default output cap |
 | `CLAUDE_MEM_MODE` | `code` | Observation mode, from `plugin/modes/<mode>.json` |
+| `CLAUDE_MEM_OPENROUTER_BASE_URL` | unset | Optional OpenRouter-compatible base URL (`OPENROUTER_BASE_URL` also works) |
+| `CLAUDE_MEM_SUMMARY_INPUT_BUDGET_BYTES` | `120000` | Byte cap on events fed into a session summary. Kept low for the Free plan's 10 ms CPU budget |
 
 Set API keys with `wrangler secret put`. Never add them to `vars`, because a
-var and a secret share one namespace.
+var and a secret share one namespace. Until the selected provider's key is set,
+generation jobs stay `queued`. The cron picks them up once the key exists.
 
 ### Bootstrap the first API key
 
