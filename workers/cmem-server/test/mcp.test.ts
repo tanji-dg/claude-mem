@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
-// Resolved through the alias config: this relative import of the repo logger
-// must land on the Worker shim (proves build/aliases.mjs is applied).
-import { logger } from '../../../src/utils/logger';
 import { api, bootstrap } from './helpers';
+
+// Resolved through the alias config: this relative import of the repo logger
+// must land on the Worker shim (proves build/aliases.mjs is applied). The
+// `as string` stops tsc from following it into the Node-only original (the
+// cast is erased, so Vite still sees a literal specifier and resolves it).
+const { logger } = (await import('../../../src/utils/logger' as string)) as {
+	logger: { constructor: { name: string } };
+};
 
 const MCP_HEADERS = { Accept: 'application/json, text/event-stream' };
 

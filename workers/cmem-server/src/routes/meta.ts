@@ -6,6 +6,8 @@
 import { json } from '../http';
 import type { RouteContext } from '../router';
 
+// Matches the Express runtime, which still reports the legacy literal
+// (src/server/runtime/ServerService.ts), so clients see one value for both.
 const SERVER_RUNTIME = 'server-beta';
 
 export function getHealthz(): Response {

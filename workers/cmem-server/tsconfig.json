@@ -22,5 +22,7 @@
 			"@modelcontextprotocol/sdk/*": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/*"]
 		}
 	},
-	"include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "worker-configuration.d.ts"]
+	// vitest.config.ts runs in Node (node:fs, node:path) and this config has no
+	// Node types, so it is left to vitest's own loader.
+	"include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts"]
 }
