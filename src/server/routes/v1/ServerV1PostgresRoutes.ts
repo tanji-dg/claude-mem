@@ -4,7 +4,7 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import { z, type ZodTypeAny } from 'zod';
 import type { RouteHandler } from '../../../services/server/Server.js';
 import { CreateAgentEventSchema } from '../../../core/schemas/agent-event.js';
-import type { PostgresPool } from '../../../storage/postgres/pool.js';
+import { withPostgresTransaction, type PostgresPool } from '../../../storage/postgres/pool.js';
 import {
   PostgresAgentEventsRepository,
   type CreatePostgresAgentEventInput,
@@ -29,7 +29,7 @@ import { createRecallMcpServer, type RecallBackend } from '../../mcp/recall-mcp-
 import { requireRateLimit, requireMonthlyQuota } from '../../middleware/rate-limit.js';
 import { meterRequests } from '../../middleware/usage-metering.js';
 import { PostgresUsageRepository } from '../../../storage/postgres/usage.js';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PostgresServerSessionsRepository } from '../../../storage/postgres/server-sessions.js';
 import { IngestEventsService, type EnqueueOutcome } from '../../services/IngestEventsService.js';
 import { EndSessionService } from '../../services/EndSessionService.js';
@@ -733,6 +733,29 @@ export class ServerV1PostgresRoutes implements RouteHandler {
 
     // POST /v1/sessions/start — create-or-find a server_session, idempotent
     // on platform-scoped external session identity when platformSource is set.
+    // POST /v1/projects/resolve — find-or-create a project by client-side name
+    // in the key's team, so one team-scoped key serves every local project.
+    // Same contract as workers/cmem-server/src/routes/projects.ts.
+    app.post('/v1/projects/resolve', sessionsWriteAuth, this.handleCreate(
+      z.object({ name: z.string().trim().min(1).max(200) }),
+      async (req, res, body) => {
+        const teamId = this.requireTeamId(req, res);
+        if (!teamId) return;
+        if (req.authContext?.projectId) {
+          res.status(403).json({
+            error: 'Forbidden',
+            message: 'API key is scoped to one project; resolving projects needs a team-scoped key',
+          });
+          return;
+        }
+        const { project, created } = await withPostgresTransaction(
+          this.options.pool,
+          client => new PostgresProjectsRepository(client).findOrCreateByName(teamId, body.name),
+        );
+        res.status(created ? 201 : 200).json({ project: { id: project.id, name: project.name }, created });
+      },
+    ));
+
     // Body matches the worker
     // /v1/sessions/start payload but stores into Postgres server_sessions.
     app.post('/v1/sessions/start', sessionsWriteAuth, this.handleCreate(
@@ -901,6 +924,12 @@ export class ServerV1PostgresRoutes implements RouteHandler {
         kind: z.string().min(1).optional(),
         content: z.string().min(1),
         metadata: z.record(z.string(), z.unknown()).optional(),
+        // Imports keep their original time and resend safely: the same key
+        // returns the existing memory. Same contract as the Cloudflare Worker.
+        createdAtEpoch: z.number().int().positive()
+          .refine(epoch => epoch <= Date.now() + 5 * 60_000, 'createdAtEpoch is in the future')
+          .optional(),
+        idempotencyKey: z.string().min(1).max(200).optional(),
       }),
       async (req, res, body) => {
         const teamId = this.requireTeamId(req, res);
@@ -915,19 +944,26 @@ export class ServerV1PostgresRoutes implements RouteHandler {
           // explicit null keep meaning different things
           ...this.sessionLookupPlatformScope(req.body),
         });
+        const id = randomUUID();
         const createInput = {
+          id,
           projectId: body.projectId,
           teamId,
           serverSessionId: linkedSessionId,
           kind: body.kind ?? 'manual',
           content: body.content,
           metadata: body.metadata ?? {},
+          // Namespaced so it can never collide with a generation job's key.
+          generationKey: body.idempotencyKey ? `memory:${body.idempotencyKey}` : null,
+          createdAtEpoch: body.createdAtEpoch ?? null,
         };
         try {
           const repo = new PostgresObservationRepository(this.options.pool);
           const observation = await repo.create(createInput);
-          await this.auditWrite(req, 'memory.write', observation.id, observation.projectId);
-          res.status(201).json({ memory: serializeObservation(observation) });
+          // A resent idempotency key returns the row stored the first time.
+          const created = observation.id === id;
+          if (created) await this.auditWrite(req, 'memory.write', observation.id, observation.projectId);
+          res.status(created ? 201 : 200).json({ memory: serializeObservation(observation) });
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
           logger.warn('SYSTEM', 'memory.write failed', { requestId: req.requestId ?? null }, err);

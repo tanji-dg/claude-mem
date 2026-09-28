@@ -143,6 +143,30 @@ export class AuthRepository {
 			.bind(input.id ?? newId(), input.teamId, input.name, JSON.stringify(input.metadata ?? {}), now);
 	}
 
+	/**
+	 * Oldest project named `name` in the team, created first when missing. The
+	 * insert is a single INSERT … WHERE NOT EXISTS statement and SQLite runs
+	 * statements one at a time, so concurrent resolvers cannot both create it.
+	 */
+	async findOrCreateProjectByName(teamId: string, name: string): Promise<{ project: Project; created: boolean }> {
+		const id = newId();
+		const now = nowMs();
+		const [, found] = await this.db.batch<ProjectRow>([
+			this.db
+				.prepare(
+					`INSERT INTO projects (id, team_id, name, metadata, created_at, updated_at)
+					 SELECT ?1, ?2, ?3, '{}', ?4, ?4
+					 WHERE NOT EXISTS (SELECT 1 FROM projects WHERE team_id = ?2 AND name = ?3)`,
+				)
+				.bind(id, teamId, name, now),
+			this.db
+				.prepare('SELECT * FROM projects WHERE team_id = ?1 AND name = ?2 ORDER BY created_at, id LIMIT 1')
+				.bind(teamId, name),
+		]);
+		const row = found!.results[0]!;
+		return { project: mapProjectRow(row), created: row.id === id };
+	}
+
 	async getProjectForTeam(projectId: string, teamId: string): Promise<Project | null> {
 		const row = await this.db
 			.prepare('SELECT * FROM projects WHERE id = ?1 AND team_id = ?2')

@@ -72,6 +72,7 @@
     "worker:restart": "bun plugin/scripts/worker-service.cjs restart",
     "worker:status": "bun plugin/scripts/worker-service.cjs status",
     "queue": "bun scripts/check-pending-queue.ts",
+    "server:import-local": "bun scripts/server-import-local.ts",
     "queue:process": "bun scripts/check-pending-queue.ts --process",
     "queue:clear:pending": "bun scripts/clear-pending-queue.ts --all --force",
     "pr:status": "bun scripts/pr-babysit-status.ts",

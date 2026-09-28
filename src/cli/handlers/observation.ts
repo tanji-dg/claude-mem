@@ -10,6 +10,7 @@ import { shouldTrackProject } from '../../shared/should-track-project.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError, type ServerRecordEventRequest } from '../../services/hooks/server-client.js';
+import { resolveServerProjectId } from '../../services/hooks/server-project.js';
 
 async function dispatchToWorker(
   input: NormalizedHookInput,
@@ -66,8 +67,7 @@ export const observationHandler: EventHandler = {
     // value. `runtime-selector.selectRuntime()` continues to accept the legacy
     // `'server-beta'` literal in settings.json and normalizes it to `'server'`.
     if (runtime.runtime === 'server') {
-      const event: ServerRecordEventRequest = {
-        projectId: runtime.projectId,
+      const event: Omit<ServerRecordEventRequest, 'projectId'> = {
         contentSessionId: sessionId,
         platformSource,
         sourceType: 'hook',
@@ -85,7 +85,7 @@ export const observationHandler: EventHandler = {
         },
       };
       try {
-        await runtime.client.recordEvent(event);
+        await runtime.client.recordEvent({ ...event, projectId: await resolveServerProjectId(runtime, cwd) });
         logger.debug('HOOK', 'Observation sent successfully via server', { toolName });
         return { continue: true, suppressOutput: true };
       } catch (error: unknown) {

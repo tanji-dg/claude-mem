@@ -38,6 +38,8 @@ import {
   type SelectedRuntime,
   type ServerRuntimeContext,
 } from '../services/hooks/runtime-selector.js';
+import { resolveServerProjectId } from '../services/hooks/server-project.js';
+import { resolveHookProjectPath } from '../utils/project-name.js';
 import { normalizePlatformSource } from '../shared/platform-source.js';
 import { getAdvertisedMcpToolsForRuntime } from './mcp-tool-visibility.js';
 
@@ -167,10 +169,18 @@ function resolveServerToolContext(): ServerResolution | null {
     return {
       runtime: 'server',
       available: false,
-      reason: 'server runtime is selected but configuration is incomplete (missing url, api key, or project id)',
+      reason: 'server runtime is selected but configuration is incomplete (missing url or api key)',
     };
   }
   return { ...ctx, available: true };
+}
+
+// Explicit tool argument first; otherwise the fixed CLAUDE_MEM_SERVER_PROJECT_ID
+// or, without one, the server project for this MCP server's own project dir
+// (CLAUDE_PROJECT_DIR, else cwd) — the same name the hooks resolve.
+async function mcpProjectId(ctx: ServerRuntimeContext, argProjectId: string | undefined): Promise<string> {
+  if (argProjectId && argProjectId.trim().length > 0) return argProjectId;
+  return resolveServerProjectId(ctx, resolveHookProjectPath(process.cwd()) ?? process.cwd());
 }
 
 function formatToolError(error: unknown): { content: Array<{ type: 'text'; text: string }>; isError: true } {
@@ -245,7 +255,7 @@ const handleObservationAdd = wrapHandler('observation_add', async (args: Observa
   if (typeof args?.content !== 'string' || args.content.trim().length === 0) {
     throw new Error('observation_add: "content" is required');
   }
-  const projectId = args.projectId && args.projectId.trim().length > 0 ? args.projectId : ctx.projectId;
+  const projectId = await mcpProjectId(ctx, args.projectId);
   const request: ServerAddObservationRequest = {
     projectId,
     content: args.content,
@@ -281,7 +291,7 @@ const handleObservationRecordEvent = wrapHandler('observation_record_event', asy
   if (typeof args?.eventType !== 'string' || args.eventType.trim().length === 0) {
     throw new Error('observation_record_event: "eventType" is required');
   }
-  const projectId = args.projectId && args.projectId.trim().length > 0 ? args.projectId : ctx.projectId;
+  const projectId = await mcpProjectId(ctx, args.projectId);
   const request: ServerRecordEventRequest = {
     projectId,
     sourceType: args.sourceType ?? 'api',
@@ -310,7 +320,7 @@ const handleObservationSearch = wrapHandler('observation_search', async (args: O
   if (typeof args?.query !== 'string' || args.query.trim().length === 0) {
     throw new Error('observation_search: "query" is required');
   }
-  const projectId = args.projectId && args.projectId.trim().length > 0 ? args.projectId : ctx.projectId;
+  const projectId = await mcpProjectId(ctx, args.projectId);
   const request: ServerSearchObservationsRequest = {
     projectId,
     query: args.query,
@@ -333,7 +343,7 @@ const handleObservationContext = wrapHandler('observation_context', async (args:
   if (typeof args?.query !== 'string' || args.query.trim().length === 0) {
     throw new Error('observation_context: "query" is required');
   }
-  const projectId = args.projectId && args.projectId.trim().length > 0 ? args.projectId : ctx.projectId;
+  const projectId = await mcpProjectId(ctx, args.projectId);
   const request: ServerContextObservationsRequest = {
     projectId,
     query: args.query,
@@ -522,7 +532,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
         args?.dateEnd !== undefined || args?.offset !== undefined || args?.orderBy !== undefined;
       if (sb && sb.available && hasText && typeIsObservations && !hasUnsupportedFilter) {
         const request: ServerSearchObservationsRequest = {
-          projectId: sb.projectId,
+          projectId: await mcpProjectId(sb, undefined),
           query: args.query,
           ...(args.limit !== undefined ? { limit: args.limit } : {}),
         };
@@ -619,7 +629,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     inputSchema: {
       type: 'object',
       properties: {
-        projectId: { type: 'string', description: 'Project id (falls back to CLAUDE_MEM_SERVER_PROJECT_ID)' },
+        projectId: { type: 'string', description: 'Project id (falls back to CLAUDE_MEM_SERVER_PROJECT_ID, else the server project for the current local project)' },
         serverSessionId: { type: 'string', description: 'Optional server_session_id to attach the observation to' },
         kind: { type: 'string', description: 'Observation kind (default: manual)' },
         content: { type: 'string', description: 'Observation content (required)' },

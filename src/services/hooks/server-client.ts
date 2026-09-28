@@ -206,6 +206,12 @@ export interface ServerJobStatusResponse {
   };
 }
 
+// POST /v1/projects/resolve — find-or-create a server project by local name.
+export interface ServerResolveProjectResponse {
+  project: { id: string; name: string };
+  created: boolean;
+}
+
 export class ServerClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -215,6 +221,11 @@ export class ServerClient {
     this.baseUrl = stripTrailingSlash(config.serverBaseUrl);
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  // Needs a team-scoped key; a project-scoped key gets 403.
+  async resolveProject(name: string): Promise<ServerResolveProjectResponse> {
+    return this.request<ServerResolveProjectResponse>('POST', '/v1/projects/resolve', { name });
   }
 
   async startSession(input: ServerStartSessionRequest): Promise<ServerStartSessionResponse> {

@@ -20,6 +20,7 @@ import {
   type ServerRuntimeContext,
 } from '../../services/hooks/runtime-selector.js';
 import { isServerClientError } from '../../services/hooks/server-client.js';
+import { resolveServerProjectIdForName } from '../../services/hooks/server-project.js';
 
 interface SessionInitResponse {
   sessionDbId: number;
@@ -108,7 +109,7 @@ export const sessionInitHandler: EventHandler = {
         // (same FTS surface as the MCP `observation_context` tool). Fail
         // open: a context failure must never block the prompt.
         const additionalContext = semanticInject && shouldSemanticInject(prompt)
-          ? await fetchServerSemanticContext(runtime, prompt, platformSource, settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT)
+          ? await fetchServerSemanticContext(runtime, project, prompt, platformSource, settings.CLAUDE_MEM_SEMANTIC_INJECT_LIMIT)
           : '';
         if (additionalContext) {
           return {
@@ -210,7 +211,7 @@ async function startServerSession(
   prompt: string,
 ): Promise<void> {
   await runtime.client.startSession({
-    projectId: runtime.projectId,
+    projectId: await resolveServerProjectIdForName(runtime, project),
     externalSessionId: sessionId,
     contentSessionId: sessionId,
     agentId: input.agentId ?? null,
@@ -230,13 +231,14 @@ function shouldSemanticInject(prompt: string): boolean {
 
 async function fetchServerSemanticContext(
   runtime: ServerRuntimeContext,
+  project: string,
   prompt: string,
   platformSource: string,
   rawLimit: string | number | undefined,
 ): Promise<string> {
   try {
     const response = await runtime.client.contextObservations({
-      projectId: runtime.projectId,
+      projectId: await resolveServerProjectIdForName(runtime, project),
       query: prompt,
       // /v1/context caps limit at 50 (zod max).
       limit: Math.min(parseSemanticInjectLimit(rawLimit ?? '5'), 50),

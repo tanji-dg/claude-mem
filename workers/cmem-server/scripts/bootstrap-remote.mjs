@@ -14,6 +14,9 @@
 //   --out <file>          credentials file (default ~/.cloudflare/cmem-server.env)
 //   --team <name>         team name   (default "default")
 //   --project <name>      project name (default "default")
+//   --team-key            mint a team-scoped key (no project): every local
+//                         project then gets its own server project, found or
+//                         created by name through POST /v1/projects/resolve
 //   --keep-admin-token    skip step 4
 //   --no-secret           skip steps 1 and 4; use CMEM_ADMIN_TOKEN from the
 //                         environment (token already set, or `wrangler dev`)
@@ -32,6 +35,7 @@ const { values: opts } = parseArgs({
 		out: { type: 'string', default: resolve(homedir(), '.cloudflare', 'cmem-server.env') },
 		team: { type: 'string', default: 'default' },
 		project: { type: 'string', default: 'default' },
+		'team-key': { type: 'boolean', default: false },
 		'keep-admin-token': { type: 'boolean', default: false },
 		'no-secret': { type: 'boolean', default: false },
 	},
@@ -69,7 +73,7 @@ function bootstrap() {
 	return fetch(`${baseUrl}/v1/admin/bootstrap`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-		body: JSON.stringify({ teamName: opts.team, projectName: opts.project }),
+		body: JSON.stringify({ teamName: opts.team, projectName: opts.project, ...(opts['team-key'] ? { keyScope: 'team' } : {}) }),
 	});
 }
 
@@ -114,7 +118,8 @@ writeFileSync(
 		`# cmem-server credentials, minted ${new Date().toISOString()}`,
 		`CLAUDE_MEM_SERVER_URL=${baseUrl}`,
 		`CLAUDE_MEM_SERVER_API_KEY=${body.apiKey}`,
-		`CLAUDE_MEM_SERVER_PROJECT_ID=${body.projectId}`,
+		// Team keys leave it unset so hooks resolve one project per local name.
+		...(body.projectId ? [`CLAUDE_MEM_SERVER_PROJECT_ID=${body.projectId}`] : []),
 		`CMEM_TEAM_ID=${body.teamId}`,
 		'',
 	].join('\n'),
@@ -133,6 +138,6 @@ if (manageSecret && !opts['keep-admin-token']) {
 }
 
 console.log(`
-Next: point claude-mem at the server. Copy the three CLAUDE_MEM_SERVER_* lines
+Next: point claude-mem at the server. Copy the CLAUDE_MEM_SERVER_* lines
 from ${outFile} into ~/.claude-mem/settings.json together with
 "CLAUDE_MEM_RUNTIME": "server" (or export them as environment variables).`);

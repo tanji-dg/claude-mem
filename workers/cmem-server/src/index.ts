@@ -17,12 +17,14 @@ import { getJob } from './routes/jobs';
 import { handleMcp } from './routes/mcp';
 import { deleteMemory, getContextInject, postContext, postMemory, postSearch } from './routes/memories';
 import { getHealthz, getInfo } from './routes/meta';
+import { postResolveProject } from './routes/projects';
 import { endSessionRoute, startSession } from './routes/sessions';
 
 export const router = new Router()
 	.on('GET', '/healthz', getHealthz)
 	.on('GET', '/v1/info', getInfo)
 	.on('POST', '/v1/admin/bootstrap', postAdminBootstrap)
+	.on('POST', '/v1/projects/resolve', postResolveProject)
 	.on('POST', '/v1/sessions/start', startSession)
 	.on('POST', '/v1/sessions/:id/end', endSessionRoute)
 	.on('POST', '/v1/events', postEvent)

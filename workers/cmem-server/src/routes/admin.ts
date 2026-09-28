@@ -18,6 +18,9 @@ import { newId } from '../storage/utils';
 const BootstrapSchema = z.object({
 	teamName: z.string().trim().min(1).max(200).optional(),
 	projectName: z.string().trim().min(1).max(200).optional(),
+	// "team" mints a key with no project, for clients that resolve one project
+	// per local name through POST /v1/projects/resolve.
+	keyScope: z.enum(['project', 'team']).optional(),
 });
 
 export const BOOTSTRAP_KEY_SCOPES = ['memories:read', 'memories:write'] as const;
@@ -35,13 +38,13 @@ export async function postAdminBootstrap(rc: RouteContext): Promise<Response> {
 	if (!parsed.success) return validationError(parsed.error.issues);
 
 	const teamId = newId();
-	const projectId = newId();
+	const projectId = parsed.data.keyScope === 'team' ? null : newId();
 	const apiKey = generateApiKey();
 	const repo = new AuthRepository(rc.env.DB);
 	// One batch = one transaction: never a team without its key.
 	await rc.env.DB.batch([
 		repo.createTeamStatement({ id: teamId, name: parsed.data.teamName ?? 'default' }),
-		repo.createProjectStatement({ id: projectId, teamId, name: parsed.data.projectName ?? 'default' }),
+		...(projectId ? [repo.createProjectStatement({ id: projectId, teamId, name: parsed.data.projectName ?? 'default' })] : []),
 		repo.createApiKeyStatement({
 			keyHash: await hashApiKey(apiKey),
 			teamId,

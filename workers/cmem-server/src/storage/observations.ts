@@ -49,6 +49,8 @@ export interface CreateObservationInput {
 	metadata?: JsonObject;
 	embedding?: JsonValue | null;
 	createdByJobId?: string | null;
+	/** Original creation time for imported rows; defaults to now. */
+	createdAtEpoch?: number | null;
 }
 
 export interface AddObservationSourceInput {
@@ -127,7 +129,7 @@ export class ObservationRepository {
 				   id, project_id, team_id, server_session_id, kind, content,
 				   generation_key, metadata, embedding, created_by_job_id, created_at, updated_at
 				 )
-				 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11
+				 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
 				 WHERE EXISTS (SELECT 1 FROM projects WHERE id = ?2 AND team_id = ?3)
 				   AND (?4 IS NULL OR EXISTS (SELECT 1 FROM server_sessions WHERE id = ?4 AND project_id = ?2 AND team_id = ?3))
 				   AND (?10 IS NULL OR EXISTS (SELECT 1 FROM observation_generation_jobs WHERE id = ?10 AND project_id = ?2 AND team_id = ?3))
@@ -146,6 +148,7 @@ export class ObservationRepository {
 				JSON.stringify(input.metadata ?? {}),
 				input.embedding == null ? null : JSON.stringify(input.embedding),
 				input.createdByJobId ?? null,
+				input.createdAtEpoch ?? now,
 				now,
 			);
 	}

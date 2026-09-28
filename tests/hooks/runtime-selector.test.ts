@@ -154,12 +154,24 @@ describe('runtime-selector', () => {
     }
   });
 
-  it('buildServerContext returns null when project id missing on both new and legacy keys', () => {
+  it('buildServerContext resolves projects per local name when no project id is set', () => {
     mockSettings.CLAUDE_MEM_RUNTIME = 'server';
     mockSettings.CLAUDE_MEM_SERVER_URL = 'http://localhost:1234';
     mockSettings.CLAUDE_MEM_SERVER_API_KEY = 'cmem_xyz';
-    expect(buildServerContext()).toBeNull();
-    expect(warnLogs.some(l => l.msg.includes('missing_project_id'))).toBe(true);
+    const ctx = buildServerContext();
+    expect(ctx).not.toBeNull();
+    expect(ctx?.projectId).toBeNull();
+    expect(ctx?.cacheScope).toMatch(/^[0-9a-f]{16}$/);
+    expect(warnLogs.some(l => l.msg.includes('missing_project_id'))).toBe(false);
+  });
+
+  it('buildServerContext cache scope differs per key', () => {
+    mockSettings.CLAUDE_MEM_RUNTIME = 'server';
+    mockSettings.CLAUDE_MEM_SERVER_URL = 'http://localhost:1234';
+    mockSettings.CLAUDE_MEM_SERVER_API_KEY = 'cmem_a';
+    const a = buildServerContext()?.cacheScope;
+    mockSettings.CLAUDE_MEM_SERVER_API_KEY = 'cmem_b';
+    expect(buildServerContext()?.cacheScope).not.toBe(a);
   });
 
   it('logServerFallback emits a stable WARN code', () => {

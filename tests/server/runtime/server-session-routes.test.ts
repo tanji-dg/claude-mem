@@ -156,6 +156,52 @@ describe('ServerV1PostgresRoutes Phase 6 session endpoints', () => {
     expect(deleted.status).toBe(403);
   });
 
+  it('POST /v1/projects/resolve finds or creates one project per name for team-scoped keys', async () => {
+    const { raw, hash } = newApiKey();
+    await storage.auth.createApiKey({ keyHash: hash, teamId, actorId: 'test', scopes: [...HOOK_API_KEY_SCOPES] });
+    const resolve = (key: string, name: string) => fetch(`http://127.0.0.1:${port}/v1/projects/resolve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+
+    const first = await resolve(raw, 'kozekachi_ai');
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+    expect(firstBody).toMatchObject({ created: true, project: { name: 'kozekachi_ai' } });
+
+    const concurrent = await Promise.all(Array.from({ length: 6 }, () => resolve(raw, ' kozekachi_ai ')));
+    const ids = await Promise.all(concurrent.map(async r => (await r.json()).project.id));
+    expect(new Set(ids)).toEqual(new Set([firstBody.project.id]));
+    expect(concurrent.every(r => r.status === 200)).toBe(true);
+
+    const other = await (await resolve(raw, 'claude-mem')).json();
+    expect(other.project.id).not.toBe(firstBody.project.id);
+
+    // The fixture key is project-scoped.
+    expect((await resolve(apiKeyRaw, 'kozekachi_ai')).status).toBe(403);
+  });
+
+  it('POST /v1/memories keeps an imported createdAtEpoch and dedupes on idempotencyKey', async () => {
+    const body = { projectId, content: 'imported', createdAtEpoch: 1_700_000_000_000, idempotencyKey: 'local:obs:42' };
+    const first = await authedFetch('/v1/memories', { method: 'POST', body: JSON.stringify(body) });
+    expect(first.status).toBe(201);
+    const created = (await first.json()).memory;
+    expect(created.createdAtEpoch).toBe(1_700_000_000_000);
+
+    const again = await authedFetch('/v1/memories', { method: 'POST', body: JSON.stringify({ ...body, content: 'changed' }) });
+    expect(again.status).toBe(200);
+    expect((await again.json()).memory).toMatchObject({ id: created.id, content: 'imported' });
+    const count = await client.query('SELECT count(*)::int AS n FROM observations WHERE project_id = $1', [projectId]);
+    expect(count.rows[0].n).toBe(1);
+
+    const future = await authedFetch('/v1/memories', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, content: 'x', createdAtEpoch: Date.now() + 60 * 60_000 }),
+    });
+    expect(future.status).toBe(400);
+  });
+
   it('POST /v1/sessions/start is idempotent on legacy no-platform external_session_id', async () => {
     const a = await authedFetch('/v1/sessions/start', {
       method: 'POST',

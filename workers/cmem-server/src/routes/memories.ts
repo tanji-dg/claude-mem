@@ -13,6 +13,7 @@ import { CONTEXT_INJECT_LIMIT, renderContextInjectMarkdown } from '../services/c
 import { AuthRepository } from '../storage/auth';
 import { ObservationRepository } from '../storage/observations';
 import { ServerSessionsRepository } from '../storage/server-sessions';
+import { newId } from '../storage/utils';
 import { authorize, parseBody, sessionLookupPlatformScope } from './common';
 import { serializeObservation } from './serializers';
 
@@ -30,11 +31,21 @@ const AddMemorySchema = z
 		narrative: z.string().min(1).optional(),
 		title: z.string().min(1).optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
+		// Imports (e.g. local memories copied to the server) keep their original
+		// time, and resend safely: the same key returns the existing memory.
+		createdAtEpoch: z.number().int().positive().optional(),
+		idempotencyKey: z.string().min(1).max(200).optional(),
 	})
 	.refine((body) => Boolean(body.content ?? body.narrative ?? body.title), {
 		message: 'content is required',
 		path: ['content'],
+	})
+	.refine((body) => body.createdAtEpoch === undefined || body.createdAtEpoch <= Date.now() + MAX_CLOCK_SKEW_MS, {
+		message: 'createdAtEpoch is in the future',
+		path: ['createdAtEpoch'],
 	});
+
+const MAX_CLOCK_SKEW_MS = 5 * 60_000;
 
 const SearchSchema = z.object({
 	projectId: z.string().min(1),
@@ -66,16 +77,22 @@ export async function postMemory(rc: RouteContext): Promise<Response> {
 		teamId: authz.teamId,
 		...sessionLookupPlatformScope(parsed.raw, normalizePlatformSource),
 	});
+	const id = newId();
 	try {
 		const observation = await new ObservationRepository(rc.env.DB).create({
+			id,
 			projectId: body.projectId,
 			teamId: authz.teamId,
 			serverSessionId,
 			kind: body.kind ?? 'manual',
 			content,
 			metadata,
+			// Namespaced so it can never collide with a generation job's key.
+			generationKey: body.idempotencyKey ? `memory:${body.idempotencyKey}` : null,
+			createdAtEpoch: body.createdAtEpoch ?? null,
 		});
-		return json(201, { memory: serializeObservation(observation) });
+		// A resent idempotency key returns the row stored the first time.
+		return json(observation.id === id ? 201 : 200, { memory: serializeObservation(observation) });
 	} catch (error) {
 		return dbErrorResponse(error, 'memory.write');
 	}

@@ -43,6 +43,25 @@ export class PostgresProjectsRepository {
     return mapProjectRow(row!);
   }
 
+  /**
+   * Oldest project named `name` in the team, created first when missing.
+   * Call inside a transaction: the advisory lock (released at COMMIT)
+   * serializes concurrent resolvers of the same (team, name) without needing a
+   * UNIQUE constraint that existing databases may already violate.
+   */
+  async findOrCreateByName(teamId: string, name: string): Promise<{ project: PostgresProject; created: boolean }> {
+    await this.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`projects:${teamId}:${name}`]);
+    const existing = await queryOne<ProjectRow>(
+      this.client,
+      'SELECT * FROM projects WHERE team_id = $1 AND name = $2 ORDER BY created_at, id LIMIT 1',
+      [teamId, name]
+    );
+    if (existing) {
+      return { project: mapProjectRow(existing), created: false };
+    }
+    return { project: await this.create({ teamId, name }), created: true };
+  }
+
   async getByIdForTeam(id: string, teamId: string): Promise<PostgresProject | null> {
     const row = await queryOne<ProjectRow>(
       this.client,

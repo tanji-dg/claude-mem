@@ -57,6 +57,7 @@ need to install the repo root's dependencies.
 |---|---|---|
 | `GET` | `/healthz`, `/v1/info` | none |
 | `POST` | `/v1/admin/bootstrap` | `Authorization: Bearer <CMEM_ADMIN_TOKEN>` |
+| `POST` | `/v1/projects/resolve` (find-or-create a project by name) | Team-scoped API key |
 | `POST` | `/v1/sessions/start`, `/v1/sessions/:id/end` | API key |
 | `POST` | `/v1/events`, `/v1/events/batch` (max 20 events) | API key |
 | `POST` / `DELETE` | `/v1/memories`, `/v1/memories/:id` | API key |
@@ -129,7 +130,9 @@ curl -sS -X POST "https://cmem-server.<your-subdomain>.workers.dev/v1/admin/boot
 ```
 
 `teamName` and `projectName` are optional and default to `"default"`. Every
-call creates a new team, project and key.
+call creates a new team, project and key. With `"keyScope": "team"` it creates
+only the team and a **team-scoped** key (`projectId` is `null`), which can
+reach every project in the team (see *One server project per local project*).
 
 Or do the whole round trip with one command. It generates the admin token,
 sets it as a secret, mints the key, writes the URL, key and project id to
@@ -138,6 +141,7 @@ admin token again and waits for the route to return `404`:
 
 ```bash
 bun run bootstrap:remote --url https://cmem-server.<your-subdomain>.workers.dev
+# --team-key    mint a team-scoped key (recommended; see below)
 # --out <file>  --team <name>  --project <name>  --keep-admin-token
 # --no-secret   use CMEM_ADMIN_TOKEN from the environment (e.g. wrangler dev)
 ```
@@ -155,6 +159,19 @@ Edit `~/.claude-mem/settings.json` (flat keys):
 }
 ```
 
+### One server project per local project
+
+Leave `CLAUDE_MEM_SERVER_PROJECT_ID` unset and use a team-scoped key. Each
+hook then maps the local project name (the name the local worker uses, from
+the git repo root of the session's cwd) to its own server project through
+`POST /v1/projects/resolve`, which creates it on first use. SessionStart
+context and search then stay within the current project. Resolved ids are
+cached in `~/.claude-mem/server-projects.json`. A git worktree becomes its own
+project (`<repo>/<worktree>`), as it does locally.
+
+With `CLAUDE_MEM_SERVER_PROJECT_ID` set, every local project shares that one
+server project, as before.
+
 Environment variables with the same names override the file. The legacy
 `CLAUDE_MEM_SERVER_BETA_*` keys and `CLAUDE_MEM_RUNTIME=server-beta` are still
 read as fallbacks (`src/services/hooks/runtime-selector.ts`).
@@ -170,8 +187,29 @@ read as fallbacks (`src/services/hooks/runtime-selector.ts`).
     --header "Authorization: Bearer cmem_…"
   ```
 
-  `claude-mem install --runtime server` prints `<url>/mcp` as the MCP target.
-  That path is wrong for both this Worker and the Express server. Use `/v1/mcp`.
+  These recall tools take the server `projectId` as an argument. The plugin's
+  own stdio MCP server fills it in: `CLAUDE_MEM_SERVER_PROJECT_ID`, or else the
+  server project for its project directory.
+
+### Copy local memories to the server
+
+`scripts/server-import-local.ts` (repo root) copies the local database's
+observations and session summaries through `POST /v1/memories`. Each keeps its
+original time (`createdAtEpoch`) and an `idempotencyKey`, so re-running never
+duplicates. Local projects map to server projects as above.
+
+```bash
+bun run server:import-local --env-file ~/.cloudflare/cmem-server.env --dry-run
+bun run server:import-local --env-file ~/.cloudflare/cmem-server.env
+# --project <name> (repeatable)  --since YYYY-MM-DD  --max <n>  --include-sensitive
+```
+
+It sends the newest memories first, at most `--max` per run (default 5000,
+about 45,000 D1 rows written), and remembers progress in
+`~/.claude-mem/server-import-state.json`. On the Free plan run it once a day
+until nothing is left: D1's daily write allowance is shared by every database
+in the account. Observations of type `sensitive` stay local unless you pass
+`--include-sensitive`.
 
 ## Local development
 

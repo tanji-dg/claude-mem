@@ -81,6 +81,8 @@ export class PostgresObservationRepository {
     metadata?: JsonObject;
     embedding?: JsonValue | null;
     createdByJobId?: string | null;
+    // Original creation time for imported rows; defaults to now().
+    createdAtEpoch?: number | null;
   }): Promise<PostgresObservation> {
     await assertProjectOwnership(this.client, input.projectId, input.teamId);
     if (input.serverSessionId) {
@@ -95,9 +97,9 @@ export class PostgresObservationRepository {
       `
         INSERT INTO observations (
           id, project_id, team_id, server_session_id, kind, content,
-          generation_key, metadata, embedding, created_by_job_id
+          generation_key, metadata, embedding, created_by_job_id, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, COALESCE($11::timestamptz, now()))
         ON CONFLICT (team_id, project_id, generation_key) WHERE generation_key IS NOT NULL DO UPDATE SET
           updated_at = observations.updated_at
         RETURNING *
@@ -112,7 +114,8 @@ export class PostgresObservationRepository {
         input.generationKey ?? null,
         JSON.stringify(input.metadata ?? {}),
         input.embedding == null ? null : JSON.stringify(input.embedding),
-        input.createdByJobId ?? null
+        input.createdByJobId ?? null,
+        input.createdAtEpoch == null ? null : new Date(input.createdAtEpoch)
       ]
     );
     return mapObservationRow(row!);

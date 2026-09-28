@@ -39,6 +39,8 @@ export const ROUTE_SCOPES = {
 	memoriesDelete: { scope: 'memories:write' },
 	observationsRead: { scope: 'memories:read', alias: 'observations:read' },
 	jobsRead: { scope: 'memories:read', alias: 'jobs:read' },
+	// Find-or-create by name happens where the hooks client starts sessions.
+	projectsResolve: { scope: 'memories:write', alias: 'sessions:write' },
 } as const satisfies Record<string, ScopeRequirement>;
 
 export interface AuthContext {

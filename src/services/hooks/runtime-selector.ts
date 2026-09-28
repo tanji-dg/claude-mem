@@ -17,6 +17,7 @@
 // PROJECT_ID}` are read first and fall back to the legacy
 // `CLAUDE_MEM_SERVER_BETA_*` keys when unset.
 
+import { createHash } from 'crypto';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
 import { logger } from '../../utils/logger.js';
 import { ServerClient, type ServerClientConfig } from './server-client.js';
@@ -26,8 +27,13 @@ export type SelectedRuntime = 'worker' | 'server';
 export interface ServerRuntimeContext {
   runtime: 'server';
   client: ServerClient;
-  projectId: string;
+  // Fixed server project from CLAUDE_MEM_SERVER_PROJECT_ID, or null to map
+  // each local project name to its own server project (a team-scoped key and
+  // resolveServerProjectId in server-project.ts).
+  projectId: string | null;
   serverBaseUrl: string;
+  // Identifies the server + key pair for caching resolved project ids.
+  cacheScope: string;
 }
 
 export interface WorkerRuntimeContext {
@@ -80,11 +86,6 @@ export function buildServerContext(): ServerRuntimeContext | null {
     logger.warn('HOOK', '[server-fallback] reason=missing_api_key');
     return null;
   }
-  if (!projectId) {
-    logger.warn('HOOK', '[server-fallback] reason=missing_project_id');
-    return null;
-  }
-
   const config: ServerClientConfig = {
     serverBaseUrl,
     apiKey,
@@ -92,8 +93,9 @@ export function buildServerContext(): ServerRuntimeContext | null {
   return {
     runtime: 'server',
     client: new ServerClient(config),
-    projectId,
+    projectId: projectId || null,
     serverBaseUrl,
+    cacheScope: createHash('sha256').update(`${serverBaseUrl}\n${apiKey}`).digest('hex').slice(0, 16),
   };
 }
 

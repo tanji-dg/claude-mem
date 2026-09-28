@@ -11,6 +11,7 @@ import {
   getWorkerPort,
 } from '../../shared/worker-utils.js';
 import { getProjectContext } from '../../utils/project-name.js';
+import { resolveServerProjectId } from '../../services/hooks/server-project.js';
 import { HOOK_EXIT_CODES, HOOK_TIMEOUTS } from '../../shared/hook-constants.js';
 import { logger } from '../../utils/logger.js';
 import { loadFromFileOnce } from '../../shared/hook-settings.js';
@@ -57,11 +58,12 @@ type ServerContextOutcome =
 // local worker; anything else (4xx, bad response) injects nothing.
 async function fetchServerContext(
   runtime: ServerRuntimeContext,
+  cwd: string,
   platformSource: string | undefined,
 ): Promise<ServerContextOutcome> {
   try {
     const context = await runtime.client.contextInject({
-      projectId: runtime.projectId,
+      projectId: await resolveServerProjectId(runtime, cwd),
       ...(platformSource ? { platformSource } : {}),
     });
     return { kind: 'ok', context: typeof context === 'string' ? context : '' };
@@ -132,7 +134,7 @@ export const contextHandler: EventHandler = {
     let additionalContext: string | undefined;
     const runtime = dependencies.resolveRuntimeContext();
     if (runtime.runtime === 'server') {
-      const outcome = await fetchServerContext(runtime, normalizedPlatformSource);
+      const outcome = await fetchServerContext(runtime, cwd, normalizedPlatformSource);
       if (outcome.kind === 'failed') {
         return emptyResult;
       }

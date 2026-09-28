@@ -48,6 +48,43 @@ describe('POST /v1/memories', () => {
 		const memory = await addMemory(t.apiKey, { projectId: t.projectId, content: 'linked', contentSessionId: 'mem-cs' });
 		expect(memory.serverSessionId).toBe(session.id);
 	});
+
+	it('keeps an imported createdAtEpoch and dedupes on idempotencyKey', async () => {
+		const t = await bootstrap();
+		const body = { projectId: t.projectId, content: 'imported', createdAtEpoch: 1_700_000_000_000, idempotencyKey: 'local:obs:42' };
+		const first = await api('POST', '/v1/memories', t.apiKey, body);
+		expect(first.status).toBe(201);
+		const created = ((await first.json()) as { memory: { id: string; createdAtEpoch: number } }).memory;
+		expect(created.createdAtEpoch).toBe(1_700_000_000_000);
+
+		const again = await api('POST', '/v1/memories', t.apiKey, { ...body, content: 'changed' });
+		expect(again.status).toBe(200);
+		expect(((await again.json()) as { memory: { id: string; content: string } }).memory).toMatchObject({ id: created.id, content: 'imported' });
+		const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM observations WHERE project_id = ?1').bind(t.projectId).first<{ n: number }>();
+		expect(n?.n).toBe(1);
+
+		// Same key in another project is a different memory.
+		const other = await bootstrap();
+		expect((await api('POST', '/v1/memories', other.apiKey, { ...body, projectId: other.projectId })).status).toBe(201);
+	});
+
+	it('orders imported memories by their original time in context inject', async () => {
+		const t = await bootstrap();
+		await addMemory(t.apiKey, { projectId: t.projectId, title: 'newest', content: 'newest' });
+		await addMemory(t.apiKey, { projectId: t.projectId, title: 'old import', content: 'old import', createdAtEpoch: 1_600_000_000_000 });
+		const text = await (await api('GET', `/v1/context/inject?projectId=${t.projectId}`, t.apiKey)).text();
+		expect(text.indexOf('newest')).toBeLessThan(text.indexOf('old import'));
+		expect(text).toContain('2020-09-13 [manual] old import');
+	});
+
+	it('rejects a future or malformed createdAtEpoch and an oversized key', async () => {
+		const t = await bootstrap();
+		const post = (extra: Record<string, unknown>) => api('POST', '/v1/memories', t.apiKey, { projectId: t.projectId, content: 'x', ...extra });
+		expect((await post({ createdAtEpoch: Date.now() + 60 * 60_000 })).status).toBe(400);
+		expect((await post({ createdAtEpoch: 1.5 })).status).toBe(400);
+		expect((await post({ createdAtEpoch: -1 })).status).toBe(400);
+		expect((await post({ idempotencyKey: 'k'.repeat(201) })).status).toBe(400);
+	});
 });
 
 describe('POST /v1/search (FTS5)', () => {
