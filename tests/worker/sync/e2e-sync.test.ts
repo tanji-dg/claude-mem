@@ -88,6 +88,23 @@ describe('E2ECodec', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('turns E2E on from CLAUDE_MEM_CLOUD_SYNC_E2E_KEY alone, without a key file or setting', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cmem-e2e-envkey-'));
+    const previous = process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY;
+    try {
+      process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY = encodeE2EKey(generateE2EKey());
+      expect(configureSyncE2EFromSettings({}, join(dir, 'missing.key'))).toBe(true);
+      const op = buildContentOperation({ kind: 'observation', originDeviceId: 'dev-a', originLocalId: '1', entityRev: '1', payload: payload('t') });
+      expect(op.body).not.toContain(MARKER);
+      process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY = 'not-a-key';
+      expect(configureSyncE2EFromSettings({}, join(dir, 'missing.key'))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY;
+      else process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('sealed canonical operations', () => {
