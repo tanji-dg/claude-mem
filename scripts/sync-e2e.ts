@@ -12,7 +12,9 @@
 //   bun scripts/sync-e2e.ts backfill [--limit N] queue pre-sync history for upload
 //   bun scripts/sync-e2e.ts status               key, settings and queue counts
 //   bun scripts/sync-e2e.ts verify [--env-file F] [--wrong-key]
-//                                                pull the hub into a throwaway DB and check it decrypts
+//                                                pull the hub into a throwaway DB and check it decrypts;
+//                                                without --env-file it reads CLAUDE_MEM_CLOUD_SYNC_{HUB_URL,
+//                                                TOKEN,USER_ID,E2E_KEY} from the environment if set
 //
 // The key lives in <data dir>/sync-e2e.key (0600). Losing every copy makes the
 // hub's data unreadable; `export` output is the backup.
@@ -84,8 +86,8 @@ async function importKey(): Promise<void> {
 function readEnvFile(file: string): Record<string, string> {
   const values: Record<string, string> = {};
   for (const line of readFileSync(file, 'utf-8').split('\n')) {
-    const match = /^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match && !line.trimStart().startsWith('#')) values[match[1]!] = match[2]!;
+    const match = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (match && !line.trimStart().startsWith('#')) values[match[1]!] = match[2]!.replace(/^(['"])(.*)\1$/, '$2');
   }
   return values;
 }
@@ -157,12 +159,28 @@ function backfill(limit: number): void {
  * --wrong-key uses a fresh random key instead: nothing may be applied.
  */
 async function verify(envFile: string | undefined, wrongKey: boolean): Promise<boolean> {
-  const source = envFile ? readEnvFile(envFile) : (existsSync(settingsPath()) ? readJsonFileWithBom<Record<string, string>>(settingsPath()) : {});
-  const hubUrl = (source.CLAUDE_MEM_CLOUD_SYNC_HUB_URL ?? '').replace(/\/+$/, '');
-  const token = source.CLAUDE_MEM_CLOUD_SYNC_TOKEN ?? '';
-  const userId = source.CLAUDE_MEM_CLOUD_SYNC_USER_ID ?? '';
-  if (!hubUrl || !token || !userId) throw new UsageError('hub URL, token and user id are required (--env-file or settings.json)');
-  const codec = wrongKey ? new E2ECodec(generateE2EKey()) : requireKey();
+  // --env-file, else CLAUDE_MEM_CLOUD_SYNC_* environment variables (e.g. a cloud
+  // environment), else settings.json.
+  const fromEnv = ['CLAUDE_MEM_CLOUD_SYNC_HUB_URL', 'CLAUDE_MEM_CLOUD_SYNC_TOKEN', 'CLAUDE_MEM_CLOUD_SYNC_USER_ID']
+    .some(name => (process.env[name] ?? '') !== '');
+  const source: Record<string, string | undefined> = envFile
+    ? readEnvFile(envFile)
+    : fromEnv
+      ? process.env
+      : (existsSync(settingsPath()) ? readJsonFileWithBom<Record<string, string>>(settingsPath()) : {});
+  const hubUrl = (source.CLAUDE_MEM_CLOUD_SYNC_HUB_URL ?? '').trim().replace(/\/+$/, '');
+  const token = (source.CLAUDE_MEM_CLOUD_SYNC_TOKEN ?? '').trim();
+  const userId = (source.CLAUDE_MEM_CLOUD_SYNC_USER_ID ?? '').trim();
+  const missing = [
+    ['CLAUDE_MEM_CLOUD_SYNC_HUB_URL', hubUrl], ['CLAUDE_MEM_CLOUD_SYNC_TOKEN', token], ['CLAUDE_MEM_CLOUD_SYNC_USER_ID', userId],
+  ].filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length > 0) {
+    const where = envFile ? envFile : fromEnv ? 'environment variables' : settingsPath();
+    throw new UsageError(`missing or empty in ${where}: ${missing.join(', ')}`);
+  }
+  // The key comes from the key file, or (verify only) CLAUDE_MEM_CLOUD_SYNC_E2E_KEY.
+  const envKey = (process.env.CLAUDE_MEM_CLOUD_SYNC_E2E_KEY ?? '').trim();
+  const codec = wrongKey ? new E2ECodec(generateE2EKey()) : envKey ? new E2ECodec(decodeE2EKey(envKey)) : requireKey();
   configureSyncE2E(codec);
 
   // One stable device id per machine, so repeated runs reuse one hub device slot.
