@@ -57,8 +57,14 @@ if (key) {
 }
 writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 
+// Pin the worker to this checkout. Without it, whichever process spawns the
+// worker first (usually the MCP server) resolves worker-service.cjs from its
+// cwd, and a cloud session working in a claude-mem repo would run that
+// checkout's worker (e.g. one without E2E) instead of this one.
+const WORKER_SCRIPT = join(PLUGIN, 'scripts', 'worker-service.cjs');
+
 // Same events/matchers/timeouts as plugin/hooks/hooks.json, pointed at this checkout.
-const runner = (args) => `CLAUDE_PLUGIN_ROOT="${PLUGIN}" node "${PLUGIN}/scripts/bun-runner.js" "${PLUGIN}/scripts/worker-service.cjs" ${args}`;
+const runner = (args) => `CLAUDE_PLUGIN_ROOT="${PLUGIN}" CLAUDE_MEM_WORKER_SCRIPT_PATH="${WORKER_SCRIPT}" node "${PLUGIN}/scripts/bun-runner.js" "${WORKER_SCRIPT}" ${args}`;
 const hook = (command, timeout) => ({ type: 'command', command, ...(timeout ? { timeout } : {}) });
 const hooks = {
 	SessionStart: [{ matcher: 'startup|resume|clear|compact', hooks: [hook(runner('start'), 60), hook(runner('hook claude-code context'), 60)] }],
@@ -80,6 +86,8 @@ claudeSettings.hooks = existing;
 writeFileSync(CLAUDE_SETTINGS, `${JSON.stringify(claudeSettings, null, 2)}\n`);
 console.log(`claude-mem cloud setup: hooks written to ${CLAUDE_SETTINGS}`);
 
-const mcp = spawnSync('claude', ['mcp', 'add', '--scope', 'user', 'claude-mem', '--', 'node', `${PLUGIN}/scripts/mcp-server.cjs`], { stdio: 'inherit' });
+// Re-registering replaces an entry left by an earlier (cached) setup run.
+spawnSync('claude', ['mcp', 'remove', '--scope', 'user', 'claude-mem'], { stdio: 'ignore' });
+const mcp = spawnSync('claude', ['mcp', 'add', '--scope', 'user', 'claude-mem', '-e', `CLAUDE_MEM_WORKER_SCRIPT_PATH=${WORKER_SCRIPT}`, '--', 'node', `${PLUGIN}/scripts/mcp-server.cjs`], { stdio: 'inherit' });
 console.log(mcp.status === 0 ? 'claude-mem cloud setup: MCP search server registered.' : 'claude-mem cloud setup: MCP registration skipped (claude mcp add failed).');
 console.log('claude-mem cloud setup: done.');
