@@ -17,6 +17,7 @@ import { clearSyncHealth, defaultSyncHealthFilePath } from '../../shared/sync-he
 import { purgeUndrainableSyncOutbox } from '../sync/outbox-purge.js';
 import { purgeLinkedToolUses } from '../sqlite/tool-uses.js';
 import { parseRetentionDays } from '../../shared/retention-days.js';
+import { configureSyncE2EFromSettings } from '../sync/e2e-setup.js';
 import type { DBSession } from '../worker-types.js';
 import { ensureLocalDeviceIdentity } from '../sync/local-device-identity.js';
 import { SyncRecoveryReader } from '../sync/SyncRecoveryReader.js';
@@ -99,7 +100,11 @@ export class DatabaseManager {
 
     // Inactive installs get null so the write-site `getCloudSync()?.notify()`
     // nudges are free no-ops.
-    if (cloudSyncConfigured) {
+    if (cloudSyncConfigured && !configureSyncE2EFromSettings(settings)) {
+      // E2E is required but the key is unusable: never sync in plaintext. The
+      // outbox is kept (not purged) so sync resumes once the key is in place.
+      this.cloudSync = null;
+    } else if (cloudSyncConfigured) {
       this.cloudSync = new CloudSync(this.db, settings, { healthFilePath: defaultSyncHealthFilePath() });
       const deviceId = this.cloudSync.status().deviceId;
       this.syncRecoveryReader = new SyncRecoveryReader(DB_PATH, deviceId, () => this.cloudSync!.recoveryFlags());

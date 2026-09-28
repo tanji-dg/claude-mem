@@ -78,6 +78,7 @@ const EXCLUDED_PATTERNS = [
   /media\/smoke\.ts$/,  // `worker-service media-smoke` prints its one JSON result line to the terminal for the binary smoke check
   /sqlite\/media\.ts$/,  // Media schema DDL and cleanup SQL with no failure handling of its own; every error throws to its caller (SessionStore construction, MediaStore)
   /worker\/cmem-request-correlation\.ts$/,  // Pure ID-only header builder; invalid input throws to its caller in OpenRouterProvider
+  /sync\/E2ECodec\.ts$/,  // Pure AES-GCM codec holding key material; logging happens at the e2e-setup/CanonicalContent call sites and must never see the key
 ];
 
 const HIGH_PRIORITY_PATTERNS = [
