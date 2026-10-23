@@ -54,6 +54,7 @@ import {
   compareCanonicalDecimals,
   incrementCanonicalDecimal,
   isSyncE2EEnabled,
+  mutationOf,
   parseCanonicalOperation,
   stableDocumentId,
   type CanonicalWireOp,
@@ -1412,7 +1413,10 @@ export class CloudSync {
             throw new Error('partial canonical mutation snapshot');
           }
           op = { body: row.canonical_body, operation_sha256: row.operation_sha256 };
-          mutation = parseCanonicalOperation(op).mutation!;
+          // A frozen snapshot sealed by E2E hides the mutation; open it, and fall
+          // back to the plaintext local body when the seal cannot be read.
+          mutation = mutationOf(parseCanonicalOperation(op))
+            ?? (JSON.parse(row.body) as CanonicalMutation);
           isProjectRemap = mutation.op === 'remap_project';
         } else {
           let parsed: unknown;
@@ -1436,7 +1440,7 @@ export class CloudSync {
             entityRev: row.rev,
             mutation: body as unknown as Parameters<typeof buildMutationOperation>[0]['mutation'],
           });
-          mutation = parseCanonicalOperation(op).mutation!;
+          mutation = mutationOf(parseCanonicalOperation(op)) ?? (body as unknown as CanonicalMutation);
           // First accepted serialization is frozen before its first send.
           this.db.prepare(`
             UPDATE sync_outbox
