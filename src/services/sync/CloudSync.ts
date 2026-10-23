@@ -54,6 +54,7 @@ import {
   compareCanonicalDecimals,
   incrementCanonicalDecimal,
   isSyncE2EEnabled,
+  mutationOpOf,
   parseCanonicalOperation,
   stableDocumentId,
   type CanonicalWireOp,
@@ -1257,7 +1258,7 @@ export class CloudSync {
               throw new Error('partial canonical mutation snapshot');
             }
             op = { body: row.canonical_body, operation_sha256: row.operation_sha256 };
-            isProjectRemap = parseCanonicalOperation(op).mutation?.op === 'remap_project';
+            isProjectRemap = mutationOpOf(parseCanonicalOperation(op)) === 'remap_project';
           } else {
             let parsed: unknown;
             try {

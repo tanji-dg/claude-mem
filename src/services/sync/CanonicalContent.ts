@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
 import { logger } from '../../utils/logger.js';
-import { E2E_ALG, assertSealedPayload, type E2ECodec, type SealedPayload } from './E2ECodec.js';
+import { E2E_ALG, E2EError, assertSealedPayload, isSealedPayload, type E2ECodec, type SealedPayload } from './E2ECodec.js';
 
 export const CONTENT_BODY_SCHEMA_VERSION = 1 as const;
 export const CONTENT_PAYLOAD_SCHEMA_VERSION = 2 as const;
@@ -588,6 +588,19 @@ export function decodeHubChange(change: CanonicalHubChange): {
     operation_sha256: change.operation_sha256,
     server_ts: serverTs,
   };
+}
+
+/** The mutation's `op`, read through the E2E seal when there is one; null when it cannot be read. */
+export function mutationOpOf(body: CanonicalContentBody): string | null {
+  const mutation = body.mutation;
+  if (mutation === null || mutation === undefined) return null;
+  if (!isSealedPayload(mutation)) return mutation.op;
+  if (!e2eCodec) return null;
+  try {
+    return (JSON.parse(e2eCodec.open(mutation, e2eAad(body))) as CanonicalMutation).op;
+  } catch {
+    return null;
+  }
 }
 
 /**

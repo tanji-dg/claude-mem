@@ -67,6 +67,7 @@ import {
   decodeHubChange,
   type CanonicalHubChange,
 } from './CanonicalContent.js';
+import { E2EError } from './E2ECodec.js';
 
 /**
  * A new Realtime connection must have its channel join acknowledged
@@ -104,6 +105,10 @@ export function decodeChanges(values: unknown[]): Array<SyncOp | UndecodableOp> 
     try {
       decoded = decodeHubChange(value as CanonicalHubChange);
     } catch (error) {
+      // A change sealed under another key (or tampered with) is not a poison
+      // op: setting it aside would move the cursor past data this device could
+      // read once it holds the right key. Fail the page so sync keeps retrying.
+      if (error instanceof E2EError) throw error;
       // One change we cannot decode must not fail the whole page forever:
       // keep its seq (the page stays contiguous) and let SyncApply set it
       // aside. A change without a valid seq is a broken page — that throws.
