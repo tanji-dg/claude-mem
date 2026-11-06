@@ -642,7 +642,7 @@ describe('openai-compatible requests follow the shared observer contract', () =>
     expect(result.content).toBe('');
   });
 
-  it('sends CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS as the output cap in a plain, streamed body', async () => {
+  it('sends CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS as the output cap in a plain body', async () => {
     settingsOverrides.CLAUDE_MEM_OBSERVER_MAX_OUTPUT_TOKENS = '9000';
     const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(reply({ choices: [{ message: { content: 'ok' } }] }));
     spies.push(fetchSpy);
@@ -650,9 +650,7 @@ describe('openai-compatible requests follow the shared observer contract', () =>
     await query([{ role: 'user', content: 'hi' }]);
 
     const [body] = sentBodies(fetchSpy);
-    expect(Object.keys(body).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'stream_options', 'temperature']);
-    expect(body.stream).toBe(true);
-    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(Object.keys(body).sort()).toEqual(['max_tokens', 'messages', 'model', 'temperature']);
     expect(body.max_tokens).toBe(9000);
   });
 
@@ -717,13 +715,9 @@ describe('200 error envelopes are classified by what they report', () => {
     expect(classify({ code: 401, message: 'bad key' }).kind).toBe('auth_invalid');
   });
 
-  // Never pay twice (Phase 1): the model ran and was billed; only its output
-  // was lost, so a resend would pay for the same work again. It used to be
-  // classified transient and retried.
-  it('treats a litellm parse failure as an output failure, never retried', () => {
+  it('retries a litellm parse failure instead of dropping the batch', () => {
     const err = classify({ code: 200, message: 'Unable to get json response - Expecting value: line 45 column 1' });
-    expect(err.kind).toBe('unrecoverable');
-    expect(err.paidSendOutcome).toBe('output_failure');
+    expect(err.kind).toBe('transient');
     expect(err.message).toContain('Unable to get json response');
   });
 

@@ -1,6 +1,6 @@
 
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { spoolHookEvent } from '../spool-hook-event.js';
+import { executeWithWorkerFallback, isWorkerFallback } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
@@ -28,16 +28,24 @@ export const fileEditHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    spoolHookEvent('file_edit', {
-      contentSessionId: sessionId,
-      platformSource,
-      toolName: 'write_file',
-      toolInput: { filePath, edits },
-      toolResponse: { success: true },
-      cwd,
-    });
+    const result = await executeWithWorkerFallback<{ status?: string }>(
+      '/api/sessions/observations',
+      'POST',
+      {
+        contentSessionId: sessionId,
+        platformSource,
+        tool_name: 'write_file',
+        tool_input: { filePath, edits },
+        tool_response: { success: true },
+        cwd,
+      },
+    );
 
-    logger.debug('HOOK', 'File edit observation spooled', { filePath });
+    if (isWorkerFallback(result)) {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
+    logger.debug('HOOK', 'File edit observation sent successfully', { filePath });
     return { continue: true, suppressOutput: true };
   },
 };

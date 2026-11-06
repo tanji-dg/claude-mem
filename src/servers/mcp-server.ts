@@ -42,7 +42,6 @@ import { normalizePlatformSource } from '../shared/platform-source.js';
 import { getAdvertisedMcpToolsForRuntime } from './mcp-tool-visibility.js';
 import { getProjectContext, type ProjectContext } from '../utils/project-name.js';
 import { withCheckoutProjects } from './checkout-search-scope.js';
-import { postCorpusRequestOverSse } from './corpus-worker-stream.js';
 
 /** This server's checkout (Claude Code starts it in the workspace), resolved once. */
 let workspaceCheckout: ProjectContext | null = null;
@@ -82,23 +81,11 @@ function errorIfWorkerScriptMissing(): void {
 
 async function callWorker(
   endpoint: string,
-  opts: {
-    query?: Record<string, any>;
-    body?: Record<string, any>;
-    text?: boolean;
-    /** Long corpus work: read the worker's SSE heartbeat stream instead of one JSON reply. */
-    streamCorpusProgress?: boolean;
-  } = {}
+  opts: { query?: Record<string, any>; body?: Record<string, any>; text?: boolean } = {}
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   logger.debug('SYSTEM', '→ Worker API', undefined, { endpoint });
 
   try {
-    if (opts.streamCorpusProgress && opts.body) {
-      const corpusResult = await postCorpusRequestOverSse(endpoint, opts.body);
-      logger.debug('SYSTEM', '← Worker API success', undefined, { endpoint });
-      return { content: [{ type: 'text' as const, text: JSON.stringify(corpusResult, null, 2) }] };
-    }
-
     let response: Response;
     if (opts.body) {
       response = await workerHttpRequest(endpoint, {
@@ -613,43 +600,6 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     }
   },
   {
-    name: 'work_state_write',
-    description: 'Your canonical to-do list and working state for this project, kept across sessions: whatever is still open is shown at the start of every session. Each call appends one entry to a list. To-do item: fields {"task": "<name>", "status": "todo" | "doing" | "done" | "dropped", ...details}. State on the list itself: any other fields (the latest value of each key wins; null clears a key; "status": "done" closes the list). Returns what is still open in the list. Params: list (required), fields (required).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        list: { type: 'string', description: 'The to-do list or tracked thing this entry belongs to, e.g. "release" or "auth-refactor"' },
-        fields: {
-          type: 'object',
-          description: 'Keys to set. Include "task" to update a to-do item. Values are strings, numbers, booleans, or null to clear a key.',
-          additionalProperties: { type: ['string', 'number', 'boolean', 'null'] },
-        },
-      },
-      required: ['list', 'fields'],
-      additionalProperties: false,
-    },
-    handler: async (args: any) => callWorker('/api/work-state/entries', {
-      body: { cwd: process.cwd(), list: args?.list, fields: args?.fields },
-      text: true,
-    }),
-  },
-  {
-    name: 'work_state_read',
-    description: "Read this project's to-do lists and working state written with work_state_write: every open item, or one list, with done and dropped items when includeClosed is true. Params: list, includeClosed.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        list: { type: 'string', description: 'Read only this list' },
-        includeClosed: { type: 'boolean', description: 'Also show done and dropped items and closed lists' },
-      },
-      additionalProperties: false,
-    },
-    handler: async (args: any) => callWorker('/api/work-state', {
-      query: { cwd: process.cwd(), list: args?.list, includeClosed: args?.includeClosed },
-      text: true,
-    }),
-  },
-  {
     name: 'session_start_context',
     description: 'Render the exact worker-mode SessionStart context for a project. Calls /api/context/inject and returns the same text hooks inject at startup. Params: project OR projects, platformSource, full, colors.',
     inputSchema: {
@@ -887,7 +837,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
       additionalProperties: true
     },
     handler: async (args: any) => {
-      return await callWorker('/api/corpus', { body: args, streamCorpusProgress: true });
+      return await callWorker('/api/corpus', { body: args });
     }
   },
   {
@@ -916,7 +866,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
-      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/prime`, { body: rest, streamCorpusProgress: true });
+      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/prime`, { body: rest });
     }
   },
   {
@@ -934,7 +884,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
-      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/query`, { body: rest, streamCorpusProgress: true });
+      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/query`, { body: rest });
     }
   },
   {
@@ -952,7 +902,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
-      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/rebuild`, { body: rest, streamCorpusProgress: true });
+      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/rebuild`, { body: rest });
     }
   },
   {
@@ -969,7 +919,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
-      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/reprime`, { body: rest, streamCorpusProgress: true });
+      return await callWorker(`/api/corpus/${encodeURIComponent(name)}/reprime`, { body: rest });
     }
   }
 ];

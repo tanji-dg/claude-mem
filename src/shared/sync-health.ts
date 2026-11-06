@@ -18,7 +18,6 @@ import { join } from 'path';
 import { paths } from './paths.js';
 import { describeDuration, scrubErrorMessage } from './observer-health.js';
 import { logger } from '../utils/logger.js';
-import { emitContextInvalidation } from './context-invalidation.js';
 
 export const SYNC_HEALTH_FILENAME = 'sync-health.json';
 
@@ -132,8 +131,6 @@ export function writeSyncHealth(state: SyncHealthState, filePath: string = defau
     const tmp = `${filePath}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
     renameSync(tmp, filePath);
-    // The sync banner rides inside the SessionStart block.
-    emitContextInvalidation('all', 'sync-health');
   } catch (error) {
     logger.debug('CLOUD_SYNC', 'Failed to write sync-health file', { filePath },
       error instanceof Error ? error : new Error(String(error)));
@@ -143,10 +140,7 @@ export function writeSyncHealth(state: SyncHealthState, filePath: string = defau
 /** Remove the ledger (sync turned off: no stale banner for a feature not in use). */
 export function clearSyncHealth(filePath: string = defaultSyncHealthFilePath()): void {
   try {
-    if (existsSync(filePath)) {
-      unlinkSync(filePath);
-      emitContextInvalidation('all', 'sync-health');
-    }
+    if (existsSync(filePath)) unlinkSync(filePath);
   } catch { /* best effort */ }
 }
 

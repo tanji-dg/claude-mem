@@ -2,28 +2,30 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } fr
 
 import * as realRuntimeSelector from '../../../src/services/hooks/runtime-selector.js';
 import * as realWorkerUtils from '../../../src/shared/worker-utils.js';
+import * as realDeferredSessionEnd from '../../../src/shared/deferred-session-end.js';
 
 const realRuntimeSelectorSnapshot = { ...realRuntimeSelector };
 const realWorkerUtilsSnapshot = { ...realWorkerUtils };
+const realDeferredSessionEndSnapshot = { ...realDeferredSessionEnd };
 
 const workerCallLog: Array<{ path: string; method: string; body: unknown; options: unknown }> = [];
-const nudgeLog: string[] = [];
+const deferredSessionEndLog: Array<{ contentSessionId: string; platformSource: string }> = [];
 let useServerRuntime = false;
+let useWorkerFallback = false;
 
-// SessionEnd spools and exits: any awaited worker call is a regression.
 mock.module('../../../src/shared/worker-utils.js', () => ({
   ...realWorkerUtilsSnapshot,
   executeWithWorkerFallback: async (path: string, method: string, body: unknown, options: unknown) => {
     workerCallLog.push({ path, method, body, options });
-    return { status: 'accepted' };
+    return useWorkerFallback ? { continue: true } : { status: 'accepted' };
   },
-  ensureWorkerRunning: async () => {
-    workerCallLog.push({ path: 'ensureWorkerRunning', method: '', body: null, options: null });
-    return true;
-  },
-  workerHttpRequest: (path: string) => {
-    nudgeLog.push(path);
-    return Promise.resolve(new Response('{"status":"draining"}', { status: 202 }));
+  isWorkerFallback: () => useWorkerFallback,
+}));
+
+mock.module('../../../src/shared/deferred-session-end.js', () => ({
+  ...realDeferredSessionEndSnapshot,
+  enqueueDeferredSessionEnd: (input: { contentSessionId: string; platformSource: string }) => {
+    deferredSessionEndLog.push(input);
   },
 }));
 
@@ -36,16 +38,14 @@ mock.module('../../../src/services/hooks/runtime-selector.js', () => ({
 
 import { claudeCodeAdapter } from '../../../src/cli/adapters/claude-code.js';
 import { logger } from '../../../src/utils/logger.js';
-import { spooledEntries, useTempHookSpoolDataDir } from '../../helpers/temp-hook-spool.js';
 
 let loggerSpies: ReturnType<typeof spyOn>[] = [];
-let tempSpool: ReturnType<typeof useTempHookSpoolDataDir>;
 
 beforeEach(() => {
-  tempSpool = useTempHookSpoolDataDir();
   workerCallLog.length = 0;
-  nudgeLog.length = 0;
+  deferredSessionEndLog.length = 0;
   useServerRuntime = false;
+  useWorkerFallback = false;
   loggerSpies = [
     spyOn(logger, 'debug').mockImplementation(() => {}),
     spyOn(logger, 'warn').mockImplementation(() => {}),
@@ -56,16 +56,16 @@ beforeEach(() => {
 
 afterEach(() => {
   loggerSpies.forEach(spy => spy.mockRestore());
-  tempSpool.restore();
 });
 
 afterAll(() => {
   mock.module('../../../src/shared/worker-utils.js', () => realWorkerUtilsSnapshot);
   mock.module('../../../src/services/hooks/runtime-selector.js', () => realRuntimeSelectorSnapshot);
+  mock.module('../../../src/shared/deferred-session-end.js', () => realDeferredSessionEndSnapshot);
 });
 
 describe('sessionEndHandler', () => {
-  it('spools the normalized SessionEnd and nudges the worker without awaiting it', async () => {
+  it('posts the normalized SessionEnd fields without reading a transcript', async () => {
     const { sessionEndHandler } = await import('../../../src/cli/handlers/session-end.js');
     const input = claudeCodeAdapter.normalizeInput({
       session_id: 'session-end-123',
@@ -78,24 +78,36 @@ describe('sessionEndHandler', () => {
 
     expect(result.continue).toBe(true);
     expect(result.suppressOutput).toBe(true);
-    expect(workerCallLog).toHaveLength(0);
-    expect(nudgeLog).toEqual(['/api/spool/nudge']);
-    expect(spooledEntries()).toEqual([{
-      kind: 'session_end',
-      payload: { contentSessionId: 'session-end-123', platformSource: 'claude' },
-      enqueuedAtEpochMs: expect.any(Number),
+    expect(workerCallLog).toEqual([{
+      path: '/api/sessions/session-end',
+      method: 'POST',
+      body: {
+        contentSessionId: 'session-end-123',
+        platformSource: 'claude',
+        reason: 'logout',
+        cwd: '/tmp/session-end-project',
+      },
+      options: { workerStartupTimeoutMs: 150, timeoutMs: 750 },
     }]);
   });
 
-  it('keeps one idempotent entry when SessionEnd is delivered twice', async () => {
+  it('persists an idempotent replay entry when the worker is unavailable', async () => {
     const { sessionEndHandler } = await import('../../../src/cli/handlers/session-end.js');
-    const input = { sessionId: 'session-end-twice', cwd: '/tmp/p', platform: 'claude-code', reason: 'other' };
+    useWorkerFallback = true;
 
-    await sessionEndHandler.execute(input);
-    await sessionEndHandler.execute({ ...input, reason: 'logout' });
+    const result = await sessionEndHandler.execute({
+      sessionId: 'session-end-deferred',
+      cwd: '/tmp/session-end-project',
+      platform: 'claude-code',
+      reason: 'other',
+    });
 
-    expect(workerCallLog).toHaveLength(0);
-    expect(spooledEntries('session_end')).toHaveLength(1);
+    expect(result.continue).toBe(true);
+    expect(result.suppressOutput).toBe(true);
+    expect(deferredSessionEndLog).toEqual([{
+      contentSessionId: 'session-end-deferred',
+      platformSource: 'claude',
+    }]);
   });
 
   it('does not call the worker in server runtime', async () => {
@@ -112,6 +124,5 @@ describe('sessionEndHandler', () => {
     expect(result.continue).toBe(true);
     expect(result.suppressOutput).toBe(true);
     expect(workerCallLog).toHaveLength(0);
-    expect(spooledEntries()).toHaveLength(0);
   });
 });

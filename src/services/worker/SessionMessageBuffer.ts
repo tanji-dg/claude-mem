@@ -8,15 +8,6 @@ interface BufferedMessage {
   id: number;
   message: PendingMessage;
   claimed: boolean;
-  /**
-   * Set aside after its batch spent its PaidSendBudget (paid-send-budget.ts):
-   * never claimed or resent again, and not counted as pending, so newer work
-   * behind it keeps flowing. It stays in RAM, visible to getParkedMessages,
-   * until the session ends.
-   */
-  parked: boolean;
-  /** The `x-client-request-id` of the batch's sends, so a parked message can be traced to them. */
-  parkedClientAttemptId?: string;
   enqueuedAt: number;
 }
 
@@ -73,7 +64,7 @@ export class SessionMessageBuffer {
     }
 
     const id = this.nextId++;
-    this.getList(sessionDbId).push({ id, message, claimed: false, parked: false, enqueuedAt: Date.now() });
+    this.getList(sessionDbId).push({ id, message, claimed: false, enqueuedAt: Date.now() });
     this.onMutate?.();
     this.signal(sessionDbId);
     return id;
@@ -110,31 +101,6 @@ export class SessionMessageBuffer {
     return reset;
   }
 
-  /**
-   * Park the given messages of a session: un-claim them and never yield them
-   * again. Returns the ids actually parked (already-stored ids are gone).
-   */
-  park(sessionDbId: number, messageIds: readonly number[], clientAttemptId: string): number[] {
-    const wanted = new Set(messageIds);
-    const parkedIds: number[] = [];
-    for (const m of this.buffers.get(sessionDbId) ?? []) {
-      if (wanted.has(m.id) && !m.parked) {
-        m.parked = true;
-        m.parkedClientAttemptId = clientAttemptId;
-        m.claimed = false;
-        parkedIds.push(m.id);
-      }
-    }
-    if (parkedIds.length > 0) this.onMutate?.();
-    return parkedIds;
-  }
-
-  getParkedMessages(sessionDbId: number): Array<{ messageId: number; clientAttemptId: string | undefined }> {
-    return (this.buffers.get(sessionDbId) ?? [])
-      .filter(m => m.parked)
-      .map(m => ({ messageId: m.id, clientAttemptId: m.parkedClientAttemptId }));
-  }
-
   /** Drop everything buffered for a session. */
   clear(sessionDbId: number): number {
     const cleared = this.buffers.get(sessionDbId)?.length ?? 0;
@@ -157,15 +123,14 @@ export class SessionMessageBuffer {
     this.events.delete(sessionDbId);
   }
 
-  /** Messages still to be sent: parked ones are excluded, nothing will send them. */
   getPendingCount(sessionDbId: number): number {
-    return (this.buffers.get(sessionDbId) ?? []).filter(m => !m.parked).length;
+    return this.buffers.get(sessionDbId)?.length ?? 0;
   }
 
   getTotalDepth(): number {
     let total = 0;
     for (const list of this.buffers.values()) {
-      total += list.filter(m => !m.parked).length;
+      total += list.length;
     }
     return total;
   }
@@ -195,7 +160,7 @@ export class SessionMessageBuffer {
   }
 
   peekTypes(sessionDbId: number): Array<{ message_type: string; tool_name: string | null }> {
-    return (this.buffers.get(sessionDbId) ?? []).filter(m => !m.parked).map(m => ({
+    return (this.buffers.get(sessionDbId) ?? []).map(m => ({
       message_type: m.message.type,
       tool_name: m.message.tool_name ?? null
     }));
@@ -244,7 +209,7 @@ export class SessionMessageBuffer {
 
   /** Claim only the immediate FIFO head, never wait or cross a rejected barrier. */
   claimNextMatching(sessionDbId: number, accepts: (message: PendingMessageWithId) => boolean): PendingMessageWithId | null {
-    const next = this.buffers.get(sessionDbId)?.find(message => !message.claimed && !message.parked);
+    const next = this.buffers.get(sessionDbId)?.find(message => !message.claimed);
     if (!next) return null;
     const message = { ...next.message, _persistentId: next.id, _originalTimestamp: next.enqueuedAt };
     if (!accepts(message)) return null;
@@ -256,7 +221,7 @@ export class SessionMessageBuffer {
   private claimNext(sessionDbId: number): BufferedMessage | null {
     const list = this.buffers.get(sessionDbId);
     if (!list) return null;
-    const next = list.find(m => !m.claimed && !m.parked);
+    const next = list.find(m => !m.claimed);
     if (!next) return null;
     next.claimed = true;
     this.onMutate?.();

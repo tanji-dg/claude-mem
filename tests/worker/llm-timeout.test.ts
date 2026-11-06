@@ -258,19 +258,17 @@ describe('per-attempt deadline', () => {
     }
   });
 
-  // Never pay twice (Phase 1): a network fault before any response is
-  // ambiguous, so it is no longer retried in place (this test used to expect a
-  // second attempt). Only a refusal before work is.
-  it('does not retry an ambiguous network failure in place', async () => {
+  it('still retries a genuine transient failure', async () => {
     let attempts = 0;
-    await expect(withRetry(
+    const out = await withRetry(
       async () => {
         attempts += 1;
         if (attempts < 2) throw new Error('socket hang up');
         return 'ok';
       },
       { label: 'probe', perAttemptTimeoutMs: 5_000, maxRetries: 2, baseDelayMs: 1 },
-    )).rejects.toThrow('socket hang up');
-    expect(attempts).toBe(1);
+    );
+    expect(out).toBe('ok');
+    expect(attempts).toBe(2);
   });
 });

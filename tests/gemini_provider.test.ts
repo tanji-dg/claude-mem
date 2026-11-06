@@ -42,7 +42,6 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     cumulativeInputTokens: 0,
     cumulativeOutputTokens: 0,
     abortController: new AbortController(),
-    claimedMessageIds: [],
     generatorPromise: null,
     currentProvider: null,
     startTime: Date.now(),
@@ -104,9 +103,6 @@ describe('GeminiProvider', () => {
       CLAUDE_MEM_GEMINI_MODEL: 'gemini-flash-latest',
       CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: rateLimitingEnabled,
       CLAUDE_MEM_DATA_DIR: '/tmp/claude-mem-test',
-      // These tests drive the request shape and its failures through the
-      // generator's separate init request.
-      CLAUDE_MEM_OBSERVE_BARE_PROMPTS: 'true',
     }));
 
     getSpy = spyOn(SettingsDefaultsManager, 'get').mockImplementation((key: string) => {
@@ -191,7 +187,6 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       abortController: new AbortController(),
-      claimedMessageIds: [],
       generatorPromise: null,
       currentProvider: null,
       startTime: Date.now(),
@@ -324,7 +319,6 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       abortController: new AbortController(),
-      claimedMessageIds: [],
       generatorPromise: null,
       currentProvider: null,
       startTime: Date.now(),
@@ -493,7 +487,6 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       abortController: new AbortController(),
-      claimedMessageIds: [],
       generatorPromise: null,
       currentProvider: null,
       startTime: Date.now(),
@@ -516,7 +509,6 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       abortController: new AbortController(),
-      claimedMessageIds: [],
       generatorPromise: null,
       currentProvider: null,
       startTime: Date.now(),
@@ -549,7 +541,6 @@ describe('GeminiProvider', () => {
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
       abortController: new AbortController(),
-      claimedMessageIds: [],
       generatorPromise: null,
       currentProvider: null,
       startTime: Date.now(),
@@ -594,7 +585,6 @@ describe('GeminiProvider', () => {
         cumulativeInputTokens: 0,
         cumulativeOutputTokens: 0,
         abortController: new AbortController(),
-        claimedMessageIds: [],
         generatorPromise: null,
         currentProvider: null,
         startTime: Date.now(),
@@ -643,7 +633,6 @@ describe('GeminiProvider', () => {
         cumulativeInputTokens: 0,
         cumulativeOutputTokens: 0,
         abortController: new AbortController(),
-        claimedMessageIds: [],
         generatorPromise: null,
         currentProvider: null,
         startTime: Date.now(),

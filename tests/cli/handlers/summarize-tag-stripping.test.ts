@@ -42,36 +42,27 @@ mock.module('../../../src/shared/transcript-parser.js', () => ({
   extractLastAssistantModel: () => 'claude-test-model',
 }));
 
-// Awaited worker calls (must stay empty: Stop spools and exits) vs. the
-// fire-and-forget spool nudge.
-const awaitedWorkerCallLog: Array<{ path: string; method: string; body: any }> = [];
-const nudgeLog: string[] = [];
+const workerCallLog: Array<{ path: string; method: string; body: any }> = [];
 mock.module('../../../src/shared/worker-utils.js', () => ({
-  ...realWorkerUtilsSnapshot,
-  ensureWorkerRunning: () => {
-    awaitedWorkerCallLog.push({ path: 'ensureWorkerRunning', method: '', body: null });
-    return Promise.resolve(true);
-  },
-  workerHttpRequest: (apiPath: string) => {
-    nudgeLog.push(apiPath);
-    return Promise.resolve(new Response('{"status":"draining"}', { status: 202 }));
+  ensureWorkerRunning: () => Promise.resolve(true),
+  getWorkerPort: () => 37777,
+  workerHttpRequest: (apiPath: string, options?: any) => {
+    workerCallLog.push({ path: apiPath, method: options?.method ?? 'GET', body: options?.body });
+    return Promise.resolve(new Response('{"status":"queued"}', { status: 200 }));
   },
   executeWithWorkerFallback: async (apiPath: string, method: string, body: unknown) => {
-    awaitedWorkerCallLog.push({ path: apiPath, method, body });
+    workerCallLog.push({ path: apiPath, method, body });
     return { status: 'queued' };
   },
+  isWorkerFallback: (_result: unknown) => false,
 }));
 
 import { logger } from '../../../src/utils/logger.js';
-import { spooledEntries, useTempHookSpoolDataDir } from '../../helpers/temp-hook-spool.js';
 
 let loggerSpies: ReturnType<typeof spyOn>[] = [];
-let tempSpool: ReturnType<typeof useTempHookSpoolDataDir>;
 
 beforeEach(() => {
-  tempSpool = useTempHookSpoolDataDir();
-  awaitedWorkerCallLog.length = 0;
-  nudgeLog.length = 0;
+  workerCallLog.length = 0;
   mockExtractedMessage = '';
   extractCallCount = 0;
   loggerSpies = [
@@ -86,7 +77,6 @@ beforeEach(() => {
 
 afterEach(() => {
   loggerSpies.forEach(spy => spy.mockRestore());
-  tempSpool.restore();
 });
 
 afterAll(() => {
@@ -103,17 +93,10 @@ const baseInput = {
   transcriptPath: '/tmp/fake.jsonl',
 };
 
-function spooledSummarize(): any {
-  expect(awaitedWorkerCallLog).toHaveLength(0);
-  expect(nudgeLog).toEqual(['/api/spool/nudge']);
-  const entries = spooledEntries('summarize');
-  expect(entries).toHaveLength(1);
-  return entries[0].payload;
-}
-
-function nothingSpooled(): void {
-  expect(awaitedWorkerCallLog).toHaveLength(0);
-  expect(spooledEntries()).toHaveLength(0);
+function postedBody(): any {
+  expect(workerCallLog).toHaveLength(1);
+  const { body } = workerCallLog[0];
+  return typeof body === 'string' ? JSON.parse(body) : body;
 }
 
 describe('summarizeHandler — privacy tag stripping', () => {
@@ -128,8 +111,8 @@ describe('summarizeHandler — privacy tag stripping', () => {
 
     expect(result.continue).toBe(true);
     expect(extractCallCount).toBe(0);
-    const body = spooledSummarize();
-    expect(body.lastAssistantMessage).toBe('Codex answer');
+    const body = postedBody();
+    expect(body.last_assistant_message).toBe('Codex answer');
     expect(body.platformSource).toBe('codex');
   });
 
@@ -154,7 +137,7 @@ describe('summarizeHandler — privacy tag stripping', () => {
 
     expect(result.continue).toBe(true);
     expect(extractCallCount).toBe(1);
-    expect(spooledSummarize().lastAssistantMessage).toBe('Finished the work the other plugin asked for');
+    expect(postedBody().last_assistant_message).toBe('Finished the work the other plugin asked for');
   });
 
   it('short-circuits Codex stop hook re-entry', async () => {
@@ -171,7 +154,7 @@ describe('summarizeHandler — privacy tag stripping', () => {
     expect(result.suppressOutput).toBe(true);
     expect(result.exitCode).toBe(0);
     expect(extractCallCount).toBe(0);
-    nothingSpooled();
+    expect(workerCallLog).toHaveLength(0);
   });
 
   it('strips <private> tags and their content from last_assistant_message', async () => {
@@ -182,10 +165,10 @@ describe('summarizeHandler — privacy tag stripping', () => {
 
     expect(result.continue).toBe(true);
     expect(extractCallCount).toBe(1);
-    const body = spooledSummarize();
-    expect(body.lastAssistantMessage).not.toContain('SECRET-VALUE-42');
-    expect(body.lastAssistantMessage).not.toContain('<private>');
-    expect(body.lastAssistantMessage).toBe('Hello  world');
+    const body = postedBody();
+    expect(body.last_assistant_message).not.toContain('SECRET-VALUE-42');
+    expect(body.last_assistant_message).not.toContain('<private>');
+    expect(body.last_assistant_message).toBe('Hello  world');
   });
 
   it('preserves surrounding content when stripping privacy tags', async () => {
@@ -195,12 +178,12 @@ describe('summarizeHandler — privacy tag stripping', () => {
     const { summarizeHandler } = await import('../../../src/cli/handlers/summarize.js');
     await summarizeHandler.execute(baseInput as any);
 
-    const body = spooledSummarize();
-    expect(body.lastAssistantMessage).not.toContain('leak');
-    expect(body.lastAssistantMessage).not.toContain('another');
-    expect(body.lastAssistantMessage).toContain('Before tag.');
-    expect(body.lastAssistantMessage).toContain('Middle.');
-    expect(body.lastAssistantMessage).toContain('After.');
+    const body = postedBody();
+    expect(body.last_assistant_message).not.toContain('leak');
+    expect(body.last_assistant_message).not.toContain('another');
+    expect(body.last_assistant_message).toContain('Before tag.');
+    expect(body.last_assistant_message).toContain('Middle.');
+    expect(body.last_assistant_message).toContain('After.');
   });
 
   it('skips the worker POST when the entire turn is wrapped in a privacy tag', async () => {
@@ -211,7 +194,7 @@ describe('summarizeHandler — privacy tag stripping', () => {
 
     expect(result.continue).toBe(true);
     expect(result.suppressOutput).toBe(true);
-    nothingSpooled();
+    expect(workerCallLog).toHaveLength(0);
   });
 
   it('skips the worker POST when stripping leaves only whitespace', async () => {
@@ -220,7 +203,7 @@ describe('summarizeHandler — privacy tag stripping', () => {
     const { summarizeHandler } = await import('../../../src/cli/handlers/summarize.js');
     await summarizeHandler.execute(baseInput as any);
 
-    nothingSpooled();
+    expect(workerCallLog).toHaveLength(0);
   });
 
   it('does not modify content that contains no privacy tags', async () => {
@@ -229,8 +212,8 @@ describe('summarizeHandler — privacy tag stripping', () => {
     const { summarizeHandler } = await import('../../../src/cli/handlers/summarize.js');
     await summarizeHandler.execute(baseInput as any);
 
-    const body = spooledSummarize();
-    expect(body.lastAssistantMessage).toBe(
+    const body = postedBody();
+    expect(body.last_assistant_message).toBe(
       'Just a normal assistant turn with no privacy markers.'
     );
   });
@@ -251,10 +234,10 @@ describe('summarizeHandler — privacy tag stripping', () => {
       const { summarizeHandler } = await import('../../../src/cli/handlers/summarize.js');
       await summarizeHandler.execute(baseInput as any);
 
-      const body = spooledSummarize();
-      expect(body.lastAssistantMessage).not.toContain(secret);
-      expect(body.lastAssistantMessage).toContain('before');
-      expect(body.lastAssistantMessage).toContain('after');
+      const body = postedBody();
+      expect(body.last_assistant_message).not.toContain(secret);
+      expect(body.last_assistant_message).toContain('before');
+      expect(body.last_assistant_message).toContain('after');
     });
   }
 });
@@ -271,10 +254,10 @@ describe('Summarize handler - platformSource in request body', () => {
     expect(src).toContain('platform-source');
   });
 
-  it('should pass platformSource in the spooled summarize payload', async () => {
+  it('should pass platformSource in the summarize request body', async () => {
     const { readFileSync } = await import('fs');
     const src = readFileSync('src/cli/handlers/summarize.ts', 'utf-8');
     expect(src).toContain('platformSource');
-    expect(src).toContain("spoolHookEvent('summarize'");
+    expect(src).toContain('/api/sessions/summarize');
   });
 });

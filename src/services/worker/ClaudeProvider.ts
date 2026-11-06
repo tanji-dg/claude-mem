@@ -42,7 +42,7 @@ import {
   windowAwareConversationMaxChars,
 } from '../../shared/observer-recycle.js';
 import { resolveContextWindowTokens, observationFieldMaxChars } from './context-window.js';
-import { recycleObserverConversation, loadSessionStartContext, openObserverGeneration, observesBarePrompts } from './session/recycle-conversation.js';
+import { recycleObserverConversation, loadSessionStartContext, openObserverGeneration } from './session/recycle-conversation.js';
 import { ObserverResponsePacer } from './session/response-pacer.js';
 import { IDLE_TIMEOUT_MS } from './SessionMessageBuffer.js';
 import { optimizeObservationFields, buildFieldCompressionPrompt, type CompressedField, type FieldCompressor } from './field-optimizer.js';
@@ -52,7 +52,6 @@ import { telemetryBuffer } from '../telemetry/buffer.js';
 import { captureEvent } from '../telemetry/telemetry.js';
 import { clearDependencyStatus, recordClaudeCliSetupRequired, OBSERVER_DIR_UNUSABLE_CODE } from '../../shared/dependency-health.js';
 import { clearClaudeCliSelfHealAttempts } from './stale-spawn-recovery.js';
-import { paidSendBudgetForClaimedBatch } from './paid-send-budget.js';
 
 /**
  * Module-scoped guard so the "effort parameter" hint only fires once per
@@ -613,11 +612,7 @@ export class ClaudeProvider {
             }, truncatedResponse);
           }
 
-          // Only the CLI's own auth-failure status line; an observation may quote the phrase (#4253).
-          if (
-            message.error === 'authentication_failed' &&
-            /^Invalid API key(?: · (?:Fix external API key|Please run \/login))?$/.test(textContent.trim())
-          ) {
+          if (typeof textContent === 'string' && textContent.includes('Invalid API key')) {
             throw new Error('Invalid API key: check your API key configuration in ~/.claude-mem/settings.json or ~/.claude-mem/.env');
           }
 
@@ -962,34 +957,20 @@ export class ClaudeProvider {
     // This SDK process never resumes, so the proxy history starts over with it.
     openObserverGeneration(session, initPrompt);
 
-    // By default the init prompt is not a turn of its own: it goes out in the
-    // same message as the first observation or summary prompt.
-    const observeBarePrompt = observesBarePrompts();
-    let pendingInitPrompt: string | null = observeBarePrompt ? null : initPrompt;
-    const withPendingInitPrompt = (prompt: string): string => {
-      if (pendingInitPrompt === null) return prompt;
-      const combined = `${pendingInitPrompt}\n\n${prompt}`;
-      pendingInitPrompt = null;
-      return combined;
+    session.lastPromptSentAt = Date.now();
+    session.lastGeneratorSource = 'init';
+    let answeredBeforeSend = pacer.mark();
+    yield {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: initPrompt
+      },
+      session_id: session.contentSessionId,
+      parent_tool_use_id: null,
+      isSynthetic: true
     };
-
-    let answeredBeforeSend: number;
-    if (observeBarePrompt) {
-      session.lastPromptSentAt = Date.now();
-      session.lastGeneratorSource = 'init';
-      answeredBeforeSend = pacer.mark();
-      yield {
-        type: 'user',
-        message: {
-          role: 'user',
-          content: initPrompt
-        },
-        session_id: session.contentSessionId,
-        parent_tool_use_id: null,
-        isSynthetic: true
-      };
-      if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
-    }
+    if (!(await this.awaitObserverAnswer(session, pacer, answeredBeforeSend))) return;
 
     // Each pass waits for the previous prompt's answer at the bottom of the loop,
     // BEFORE the iterator is pulled again, so nothing is claimed while a prompt
@@ -1057,7 +1038,7 @@ export class ClaudeProvider {
           type: 'user',
           message: {
             role: 'user',
-            content: withPendingInitPrompt(obsPrompt)
+            content: obsPrompt
           },
           session_id: session.contentSessionId,
           parent_tool_use_id: null,
@@ -1083,7 +1064,7 @@ export class ClaudeProvider {
           type: 'user',
           message: {
             role: 'user',
-            content: withPendingInitPrompt(summaryPrompt)
+            content: summaryPrompt
           },
           session_id: session.contentSessionId,
           parent_tool_use_id: null,
@@ -1123,9 +1104,6 @@ export class ClaudeProvider {
       // loop, and killing the stream first means no late frame can be processed
       // between the release and the abort.
       session.abortReason = 'transport:response_stall';
-      // The unanswered prompt may have been billed: it counts against the
-      // batch's paid-send budget, read before the reset forgets the claims.
-      paidSendBudgetForClaimedBatch(session)?.recordPaidSend();
       try {
         session.abortController.abort();
       } catch {

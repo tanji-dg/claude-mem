@@ -20,7 +20,6 @@ import { loadFromFileOnce } from './hook-settings.js';
 import { viewerBaseUrl } from './viewer-url.js';
 import { relayedLine, relayedLink } from './relayed-text.js';
 import { logger } from '../utils/logger.js';
-import { emitContextInvalidation } from './context-invalidation.js';
 
 export interface ObserverHealthState {
   /** Failures since the last successful store. */
@@ -175,23 +174,11 @@ export function readObserverHealth(filePath: string = defaultHealthFilePath()): 
   }
 }
 
-/**
- * True when a ledger write can change whether the SessionStart banner shows.
- * Every stored observation records a success, so invalidating on each write
- * would re-render every cached block continuously during active work.
- */
-function bannerMayChange(prior: ObserverHealthState, next: ObserverHealthState): boolean {
-  return isObserverUnhealthy(prior) !== isObserverUnhealthy(next)
-    || JSON.stringify(prior.quotaCooldown) !== JSON.stringify(next.quotaCooldown);
-}
-
-function writeObserverHealth(state: ObserverHealthState, filePath: string, prior: ObserverHealthState): void {
+function writeObserverHealth(state: ObserverHealthState, filePath: string): void {
   try {
     const dir = join(filePath, '..');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(filePath, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    // The outage banner rides inside the SessionStart block.
-    if (bannerMayChange(prior, state)) emitContextInvalidation('all', 'observer-health');
   } catch (error) {
     logger.warn('SESSION', 'Failed to write observer-health file', { filePath },
       error instanceof Error ? error : new Error(String(error)));
@@ -295,7 +282,7 @@ export function recordObserverFailure(
       lastErrorAction: detail.action ? scrubErrorMessage(detail.action) : null,
       lastErrorUrl: detail.url ?? null,
       lastErrorRequestId: detail.requestId ?? null,
-    }, filePath, prior);
+    }, filePath);
   });
 }
 
@@ -307,7 +294,7 @@ export function recordObserverSuccess(filePath: string = defaultHealthFilePath()
       consecutiveFailures: 0,
       failingSinceAt: null,
       lastSuccessAt: Date.now(),
-    }, filePath, prior);
+    }, filePath);
   });
 }
 
@@ -333,7 +320,7 @@ export function recordObserverQuotaCooldown(
         ...(cooldown.message ? { message: scrubErrorMessage(cooldown.message) } : {}),
         ...(cooldown.servingProvider ? { servingProvider: cooldown.servingProvider } : {}),
       },
-    }, filePath, prior);
+    }, filePath);
   });
 }
 
@@ -344,7 +331,7 @@ export function clearObserverQuotaCooldown(
   withLedgerLock(filePath, () => {
     const prior = readObserverHealth(filePath);
     if (!prior || prior.quotaCooldown === null) return;
-    writeObserverHealth({ ...prior, quotaCooldown: null }, filePath, prior);
+    writeObserverHealth({ ...prior, quotaCooldown: null }, filePath);
   });
 }
 

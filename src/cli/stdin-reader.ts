@@ -124,7 +124,6 @@ export async function readJsonFromStdin(options: ReadJsonFromStdinOptions = {}):
     };
 
     try {
-      process.stdin.setEncoding('utf8');
       process.stdin.on('data', onData);
       process.stdin.on('end', onEnd);
       process.stdin.on('error', onError);

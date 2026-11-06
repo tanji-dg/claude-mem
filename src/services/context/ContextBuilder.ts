@@ -45,11 +45,6 @@ import { cooldownAppliesToCurrentAccount } from '../../shared/quota-cooldown.js'
 import { readSyncHealth, renderSyncHealthWarning } from '../../shared/sync-health.js';
 import { resolveRuntimeContext, type ServerRuntimeContext } from '../hooks/runtime-selector.js';
 import { fetchServerContextRows, type ServerContextRows } from './ServerContextRows.js';
-import { formatHeaderDateTime } from '../../shared/timeline-formatting.js';
-import {
-  CONTEXT_HEADER_TIME_PLACEHOLDER,
-  HEADER_TIME_EXPANSION_RESERVE_CHARS,
-} from '../../shared/context-cache.js';
 
 const VERSION_MARKER_PATH = path.join(
   homedir(),
@@ -90,8 +85,8 @@ function initializeDatabase(): Database | null {
   }
 }
 
-function renderEmptyState(project: string, forHuman: boolean, headerTime: string): string {
-  return forHuman ? renderHumanEmptyState(project, headerTime) : renderAgentEmptyState(project, headerTime);
+function renderEmptyState(project: string, forHuman: boolean): string {
+  return forHuman ? renderHumanEmptyState(project) : renderAgentEmptyState(project);
 }
 
 interface RenderedContext {
@@ -110,14 +105,13 @@ function buildContextOutput(
   config: ContextConfig,
   cwd: string,
   sessionId: string | undefined,
-  forHuman: boolean,
-  headerTime: string
+  forHuman: boolean
 ): RenderedContext {
   const output: string[] = [];
 
   const economics = calculateTokenEconomics(observations);
 
-  output.push(...renderHeader(project, economics, config, forHuman, headerTime));
+  output.push(...renderHeader(project, economics, config, forHuman));
 
   const displaySummaries = summaries.slice(0, config.sessionCount);
   const summariesForTimeline = prepareSummariesForTimeline(displaySummaries, summaries);
@@ -456,13 +450,9 @@ export function renderContextFromRows(
 ): { text: string; stats: ContextInjectStats | null } {
   const { observations, summaries } = rows;
   const { config, cwd, project } = scope;
-  // One header time for every render pass of this build. A cacheable build
-  // carries a placeholder instead, and the fitter keeps room for it to grow.
-  const headerTime = input?.timePlaceholders ? CONTEXT_HEADER_TIME_PLACEHOLDER : formatHeaderDateTime();
-  const headerTimeReserveChars = input?.timePlaceholders ? HEADER_TIME_EXPANSION_RESERVE_CHARS : 0;
 
   if (observations.length === 0 && summaries.length === 0) {
-    return { text: appendObserverHealthWarning(healthWarningForContext(input, forHuman), renderEmptyState(project, forHuman, headerTime)), stats: null };
+    return { text: appendObserverHealthWarning(healthWarningForContext(input, forHuman), renderEmptyState(project, forHuman)), stats: null };
   }
 
   // `--full` is an explicit human request for everything; only the block that
@@ -475,13 +465,11 @@ export function renderContextFromRows(
     // terminal preview paints this same warning red after truncating (#4252).
     healthWarningForContext(input),
     (items, cfg) =>
-      buildContextOutput(project, items, summaries, cfg, cwd, input?.session_id, false, headerTime).text,
-    input?.full
-      ? Number.POSITIVE_INFINITY
-      : CONTEXT_OUTPUT_LIMIT - (input?.reserveChars ?? 0) - headerTimeReserveChars,
+      buildContextOutput(project, items, summaries, cfg, cwd, input?.session_id, false).text,
+    input?.full ? Number.POSITIVE_INFINITY : CONTEXT_OUTPUT_LIMIT,
     Boolean(input?.full),
     forHuman ? (items, cfg) =>
-      buildContextOutput(project, items, summaries, cfg, cwd, input?.session_id, true, headerTime) : undefined
+      buildContextOutput(project, items, summaries, cfg, cwd, input?.session_id, true) : undefined
   );
 }
 

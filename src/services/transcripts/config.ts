@@ -1,7 +1,6 @@
-import { existsSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
-import { readJsonFileWithBom } from '../../shared/atomic-json.js';
 import { expandTilde, paths } from '../../shared/paths.js';
 import type { TranscriptSchema, TranscriptWatchConfig } from './types.js';
 import type { SettingsDefaults } from '../../shared/SettingsDefaultsManager.js';
@@ -111,7 +110,8 @@ export function loadTranscriptWatchConfig(path = DEFAULT_CONFIG_PATH): Transcrip
   if (!existsSync(resolvedPath)) {
     throw new Error(`Transcript watch config not found: ${resolvedPath}`);
   }
-  const parsed = readJsonFileWithBom<TranscriptWatchConfig>(resolvedPath);
+  const raw = readFileSync(resolvedPath, 'utf-8');
+  const parsed = JSON.parse(raw) as TranscriptWatchConfig;
   if (!parsed.version || !parsed.watches) {
     throw new Error(`Invalid transcript watch config: ${resolvedPath}`);
   }

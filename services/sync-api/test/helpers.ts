@@ -1,6 +1,6 @@
 import { afterAll } from "bun:test";
 import { loadEnv, type SyncApiEnv } from "../src/env";
-import { DEFAULT_SYNC_API_TIMEOUTS, startSyncApi, type SyncApiApp, type SyncApiTimeouts } from "../src/index";
+import { startSyncApi, type SyncApiApp } from "../src/index";
 import {
 	canonicalJson,
 	sha256Base64Url,
@@ -84,7 +84,7 @@ export function startSidecar(): {
 	return { server, state, baseUrl: `http://127.0.0.1:${server.port}` };
 }
 
-export async function startTestApp(timeouts: SyncApiTimeouts = DEFAULT_SYNC_API_TIMEOUTS): Promise<{
+export async function startTestApp(): Promise<{
 	app: SyncApiApp;
 	sidecar: ReturnType<typeof startSidecar>;
 	env: SyncApiEnv;
@@ -99,33 +99,8 @@ export async function startTestApp(timeouts: SyncApiTimeouts = DEFAULT_SYNC_API_
 		PORT: "0",
 		HOST: "127.0.0.1",
 	});
-	const app = await startSyncApi(env, timeouts);
+	const app = await startSyncApi(env);
 	return { app, sidecar, env };
-}
-
-export function pushRequest(
-	app: SyncApiApp,
-	userId: string,
-	deviceId: string,
-	ops: CanonicalWireOp[],
-	init: RequestInit = {},
-): Promise<Response> {
-	return fetch(`${app.url}/v1/sync/ops`, {
-		...init,
-		method: "POST",
-		headers: { ...authHeaders(userId, deviceId), "Content-Type": "application/json" },
-		body: JSON.stringify({ protocol_version: 2, ops }),
-	});
-}
-
-/** Poll until `condition` holds; fails the test after `timeoutMs`. */
-export async function waitUntil(condition: () => Promise<boolean>, label: string, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (await condition()) return;
-		await Bun.sleep(25);
-	}
-	throw new Error(`timed out waiting for ${label}`);
 }
 
 export function authHeaders(userId: string, deviceId?: string, token?: string): Record<string, string> {
@@ -174,8 +149,8 @@ export function uniqueUser(): string {
 
 const apps: Array<{ app: SyncApiApp; sidecar: ReturnType<typeof startSidecar> }> = [];
 
-export async function trackedApp(timeouts?: SyncApiTimeouts): Promise<ReturnType<typeof startTestApp>> {
-	const started = await startTestApp(timeouts);
+export async function trackedApp(): Promise<ReturnType<typeof startTestApp>> {
+	const started = await startTestApp();
 	apps.push(started);
 	return started;
 }

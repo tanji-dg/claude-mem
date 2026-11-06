@@ -23,7 +23,6 @@ import { getParkedSlotWaiterCount } from '../../../../supervisor/process-registr
 import { getUptimeSeconds } from '../../../../shared/uptime.js';
 import { assertCanonicalDecimal, type ContentKind } from '../../../sync/CanonicalContent.js';
 import type { CloudSync } from '../../../sync/CloudSync.js';
-import { emitContextInvalidation } from '../../../../shared/context-invalidation.js';
 
 const integerArrayLike = z.preprocess((value) => {
   if (Array.isArray(value)) return value;
@@ -497,7 +496,6 @@ export class DataRoutes extends BaseRouteHandler {
     }
 
     const entityRev = this.commitRowDelete(cloudSync, store, kind, table, originLocalId);
-    emitContextInvalidation('all', `delete-${kind}`, 'removal');
 
     // Only after the delete committed: open viewer tabs drop the row live.
     this.sseBroadcaster.broadcast({ type: 'item_deleted', itemType: kind, id: Number(originLocalId) });
@@ -677,7 +675,6 @@ export class DataRoutes extends BaseRouteHandler {
       ).run(sessionRow.id, contentSessionId, platformSource).changes;
       store.db.prepare(`DELETE FROM sdk_sessions WHERE id = ?`).run(sessionRow.id);
     })();
-    emitContextInvalidation('all', 'delete-session', 'removal');
 
     // Only after the delete committed: open viewer tabs drop the session live.
     this.sseBroadcaster.broadcast({ type: 'session_deleted', platformSource, contentSessionId });
@@ -715,9 +712,7 @@ export class DataRoutes extends BaseRouteHandler {
       return;
     }
     const { from, into, dryRun } = req.body as z.infer<typeof projectMergeSchema>;
-    const mergeResult = await mergeProjectInto({ from, into, dryRun: dryRun ?? false });
-    if (!dryRun) emitContextInvalidation('all', 'project-merge', 'removal');
-    res.json(mergeResult);
+    res.json(await mergeProjectInto({ from, into, dryRun: dryRun ?? false }));
   });
 
   private handleImport = this.wrapHandler((req: Request, res: Response): void => {
@@ -917,8 +912,6 @@ export class DataRoutes extends BaseRouteHandler {
       logger.warn('HTTP', 'Import rejected rows', rejectedCounts);
     }
 
-    // 'removal': an import can re-key or replace rows a cached block shows.
-    emitContextInvalidation('all', 'import', 'removal');
     res.json({
       success: true,
       stats: { ...stats, ...rejectedCounts },

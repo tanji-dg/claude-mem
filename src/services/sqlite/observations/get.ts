@@ -1,6 +1,5 @@
 
 import { Database } from 'bun:sqlite';
-import { projectScopeSql } from '../project-read-keys.js';
 import type { ObservationRecord } from '../../../types/database.js';
 import { DEFAULT_PLATFORM_SOURCE, normalizePlatformSource } from '../../../shared/platform-source.js';
 import { logger } from '../../../utils/logger.js';
@@ -34,9 +33,9 @@ export function getObservationsByFilePath(
 
   let projectClause = '';
   if (options?.projects?.length) {
-    const scope = projectScopeSql('o', options.projects, { includeMerged: true });
-    projectClause = `AND ${scope.sql}`;
-    params.push(...scope.params);
+    const placeholders = options.projects.map(() => '?').join(',');
+    projectClause = `AND o.project COLLATE NOCASE IN (${placeholders})`;
+    params.push(...options.projects);
   }
 
   let platformClause = '';

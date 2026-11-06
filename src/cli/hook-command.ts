@@ -20,7 +20,6 @@ import {
   isWorkerUnavailableError,
 } from '../shared/worker-utils.js';
 import { captureCliEvent } from '../services/telemetry/cli-telemetry.js';
-import { settleHookSpoolNudges } from './spool-hook-event.js';
 import { canonicalIntegrationId } from '../shared/integration-id.js';
 import { logger } from '../utils/logger.js';
 
@@ -72,9 +71,6 @@ async function executeHookPipeline(
   // MODEL_CONTEXT: the only stdout JSON emit, via the platform adapter.
   emitModelContext(adapter, result);
   const exitCode = result.exitCode ?? HOOK_EXIT_CODES.SUCCESS;
-  // A write hook spooled its event and started a nudge to the worker; let it
-  // land (≤ 250 ms) so the drain starts now — process.exit would kill it.
-  await settleHookSpoolNudges();
   await exitGraceful(options);
   return exitCode;
 }

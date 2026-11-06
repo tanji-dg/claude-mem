@@ -44,19 +44,15 @@ mock.module('../../../src/shared/observed-billing.js', () => ({
   detectObservedBilling: () => undefined,
 }));
 
-// Awaited worker calls must stay empty: Stop spools and exits.
 const workerCalls: Array<{ path: string; body: any }> = [];
 mock.module('../../../src/shared/worker-utils.js', () => ({
-  ...realWorkerUtilsSnapshot,
-  ensureWorkerRunning: () => {
-    workerCalls.push({ path: 'ensureWorkerRunning', body: null });
-    return Promise.resolve(true);
-  },
-  workerHttpRequest: () => Promise.resolve(new Response('{"status":"draining"}', { status: 202 })),
+  ensureWorkerRunning: () => Promise.resolve(true),
+  getWorkerPort: () => 37777,
   executeWithWorkerFallback: async (apiPath: string, _method: string, body: unknown) => {
     workerCalls.push({ path: apiPath, body });
     return { status: 'queued' };
   },
+  isWorkerFallback: () => false,
 }));
 
 const serverEvents: unknown[] = [];
@@ -77,17 +73,14 @@ mock.module('../../../src/services/hooks/runtime-selector.js', () => ({
 }));
 
 import { logger } from '../../../src/utils/logger.js';
-import { spooledEntries, useTempHookSpoolDataDir } from '../../helpers/temp-hook-spool.js';
 
 const { summarizeHandler } = await import('../../../src/cli/handlers/summarize.js');
 
 let loggerSpies: ReturnType<typeof spyOn>[] = [];
 let transcriptDir: string;
 let transcriptPath: string;
-let tempSpool: ReturnType<typeof useTempHookSpoolDataDir>;
 
 beforeEach(() => {
-  tempSpool = useTempHookSpoolDataDir();
   workerCalls.length = 0;
   serverEvents.length = 0;
   captureSetting = 'false';
@@ -124,7 +117,6 @@ beforeEach(() => {
 afterEach(() => {
   loggerSpies.forEach(spy => spy.mockRestore());
   rmSync(transcriptDir, { recursive: true, force: true });
-  tempSpool.restore();
 });
 
 afterAll(() => {
@@ -149,8 +141,7 @@ describe('Stop hook advisor-call capture', () => {
   it('records nothing by default (opt-in)', async () => {
     await summarizeHandler.execute(stopInput());
 
-    expect(workerCalls).toHaveLength(0);
-    expect(spooledEntries().map(entry => entry.kind)).toEqual(['summarize']);
+    expect(workerCalls.map(call => call.path)).toEqual(['/api/sessions/summarize']);
   });
 
   it('records the turn\'s advisor calls before queueing the summary when enabled', async () => {
@@ -158,10 +149,8 @@ describe('Stop hook advisor-call capture', () => {
 
     await summarizeHandler.execute(stopInput());
 
-    expect(workerCalls).toHaveLength(0);
-    const entries = spooledEntries();
-    expect(entries.map(entry => entry.kind)).toEqual(['advisor_calls', 'summarize']);
-    const body = entries[0].payload as any;
+    expect(workerCalls.map(call => call.path)).toEqual(['/api/advisor-calls', '/api/sessions/summarize']);
+    const body = workerCalls[0].body;
     expect(body.contentSessionId).toBe('advisor-stop-session');
     expect(body.calls).toHaveLength(1);
     expect(body.calls[0]).toMatchObject({
@@ -180,7 +169,6 @@ describe('Stop hook advisor-call capture', () => {
     await summarizeHandler.execute(stopInput());
 
     expect(workerCalls).toHaveLength(0);
-    expect(spooledEntries()).toHaveLength(0);
     expect(serverEvents).toHaveLength(1);
   });
 });

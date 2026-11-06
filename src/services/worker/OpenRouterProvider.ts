@@ -2,6 +2,7 @@
 import { getCredential } from '../../shared/EnvManager.js';
 import { isOpenRouterApiUrl, resolveOpenRouterChatCompletionsUrl } from '../../shared/openrouter-base-url.js';
 import { openRouterAttributionHeaders, OPENROUTER_APP_TITLE } from '../../shared/openrouter-attribution.js';
+import { fetchWithOpenRouterTokenCompatibility } from '../../shared/openrouter-token-compatibility.js';
 import { describeNetworkFailure, networkFailureSuffix } from '../../shared/network-failure.js';
 import { parseOpenRouterExtraBody, withOpenRouterExtraBody } from '../../shared/openrouter-extra-body.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
@@ -11,19 +12,8 @@ import { logger } from '../../utils/logger.js';
 import type { ActiveSession, ConversationMessage } from '../worker-types.js';
 import { DatabaseManager } from './DatabaseManager.js';
 import { SessionManager } from './SessionManager.js';
-import { randomUUID } from 'crypto';
 import { ClassifiedProviderError, rateLimitUntilNextKey, type ProviderErrorClass } from './provider-errors.js';
-import type { PaidSendBudget } from './paid-send-budget.js';
 import { withRetry, parseRetryAfterMs } from './retry.js';
-import {
-  DEFAULT_LLM_STREAM_IDLE_TIMEOUT_MS,
-  STREAMED_REQUEST_FIELDS,
-  resolveStreamLiveness,
-  sendChatCompletion,
-  streamsChatCompletion,
-  type ChatCompletionExchange,
-  type StreamLiveness,
-} from './streamed-chat-completion.js';
 import { buildKeyPool, resolvePoolKeys, retryPolicyForPool, withKeyPool } from '../../shared/api-key-pool.js';
 import { OpenAICompatibleProvider, assistantText, type OpenAIChatMessage as OpenAIMessage, type ProviderQueryResult } from './OpenAICompatibleProvider.js';
 import {
@@ -299,14 +289,17 @@ export function classifyOpenRouterError(input: {
   // litellm (behind OpenRouter) can fail to parse the downstream model's
   // response and surface it as a body-level error inside a 200 envelope, e.g.
   // `{ error: { code: 200, message: "Unable to get json response - Expecting
-  // value: line 45 column 1" } }`. The model ran and the request was billed;
-  // only its output was lost. Resending pays for the same work again, so it is
-  // an output failure and never retried ("never pay twice"). Kept
-  // marker-scoped so it carries its own words in the log.
+  // value: line 45 column 1" } }`. Because the body-error path forwards the
+  // success status verbatim, none of the HTTP-status branches above match and
+  // it would otherwise fall through to `unrecoverable` and never retry. These
+  // are transient upstream hiccups that usually succeed on a retry, so detect
+  // the tell-tale litellm markers and route them to the retry loop.
+  // Kept marker-scoped on purpose: OpenRouter also delivers genuine auth/quota
+  // errors inside 200 envelopes, which must stay non-transient.
   if (lower.includes('unable to get json') || lower.includes('expecting value')) {
     return new ClassifiedProviderError(
-      describe('upstream output failure'),
-      { kind: 'unrecoverable', paidSendOutcome: 'output_failure', cause: input.cause, ...detail },
+      describe('transient upstream parse failure'),
+      { kind: 'transient', cause: input.cause, ...detail },
     );
   }
 
@@ -317,10 +310,6 @@ export function classifyOpenRouterError(input: {
 }
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
-
-function openRouterRequestId(headers: Headers | undefined): string | undefined {
-  return headers?.get('x-request-id') ?? headers?.get('x-openrouter-request-id') ?? undefined;
-}
 
 interface OpenRouterResponse {
   /** The model that actually served the request — not the configured string. */
@@ -483,12 +472,11 @@ export function buildOpenRouterRequestBody(input: {
     messages: input.messages,
     temperature: 0.3,  // Lower temperature for structured extraction
     max_tokens: input.maxOutputTokens ?? DEFAULT_OBSERVER_MAX_OUTPUT_TOKENS,
-    // Streamed, so liveness (tokens, `:` pings) rather than a guessed deadline
-    // decides when a request is dead; the reply is assembled back into one
-    // chat.completion (streamed-chat-completion.ts), usage from the final
-    // chunk. The cmem gateway answers with one JSON body whatever is asked,
-    // and its requests stay exactly as they are.
-    ...(streamsChatCompletion(input.apiUrl) ? STREAMED_REQUEST_FIELDS : {}),
+    // Ask for one JSON body. A gateway that streams by default answers with
+    // text/event-stream, which response.json() cannot read, so every
+    // observation fails (#3664). false is the OpenAI default. The cmem gateway
+    // never streams unasked, and its requests stay exactly as they are.
+    ...(isCmemGatewayUrl(input.apiUrl) ? {} : { stream: false }),
     // Keep the same model, but ask for an answer instead of spending this
     // short rewrite's budget on reasoning. Only known OpenRouter endpoints
     // accept the vendor-specific reasoning control (cmem forwards it).
@@ -726,7 +714,6 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     config: OpenRouterConfig,
     signal?: AbortSignal,
     perAttemptTimeoutMs?: number,
-    paidSendBudget?: PaidSendBudget,
   ): Promise<ProviderQueryResult> {
     // Rotation wraps withRetry rather than living inside it: the inner retry
     // still owns transient failures against one key, and this outer sweep moves
@@ -737,19 +724,13 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       { poolId: 'openrouter', keys: resolvePoolKeys(config), label: 'OpenRouter', rateLimitUntilNextKey },
       ({ key, poolSize }) => this.queryOpenRouterMultiTurn(
         history, key, poolSize, config.model, config.fallbackModels, config.apiUrl, config.siteUrl, config.appName,
-        signal, config.plainText, perAttemptTimeoutMs, config.extraBody, config.reasoningEffort, paidSendBudget,
+        signal, config.plainText, perAttemptTimeoutMs, config.extraBody, config.reasoningEffort,
       ),
     );
   }
 
-  /**
-   * Silence after which a streamed request is given up. An instance field so a
-   * test can shorten it; there is no setting for it.
-   */
-  protected streamIdleTimeoutMs: number = DEFAULT_LLM_STREAM_IDLE_TIMEOUT_MS;
-
-  /** POST the chat-completions request and read its (streamed) reply. */
-  private requestChatCompletion(
+  /** POST the chat-completions request. Extracted so the retry try block stays narrow. */
+  private fetchChatCompletion(
     apiUrl: string,
     apiKey: string,
     model: string,
@@ -757,34 +738,25 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     messages: OpenAIMessage[],
     siteUrl: string | undefined,
     appName: string | undefined,
-    clientAttemptId: string,
+    priorRequestId: string | null,
     attemptSignal: AbortSignal,
     maxOutputTokens: number,
-    liveness: StreamLiveness | null,
     plainText?: boolean,
     extraBody?: Record<string, unknown>,
     reasoningEffort?: OpenRouterReasoningEffort,
-  ): Promise<ChatCompletionExchange> {
-    return sendChatCompletion({
-      url: apiUrl,
+  ): Promise<Response> {
+    const body = buildOpenRouterRequestBody({ model, fallbackModels, messages, apiUrl, plainText, maxOutputTokens, extraBody, reasoningEffort });
+    // Bound, so a runtime whose fetch needs its receiver still gets it.
+    return fetchWithOpenRouterTokenCompatibility(fetch.bind(globalThis), apiUrl, {
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         ...openRouterAttributionHeaders(siteUrl, appName),
         'Content-Type': 'application/json',
-        // Tracing only: names every send of one batch in our logs and the
-        // provider's. Never treated as server-side idempotency.
-        'x-client-request-id': clientAttemptId,
+        ...(priorRequestId ? { 'x-claude-mem-prior-request-id': priorRequestId } : {}),
       },
-      body: buildOpenRouterRequestBody({ model, fallbackModels, messages, apiUrl, plainText, maxOutputTokens, extraBody, reasoningEffort }),
-      maxOutputTokens,
       signal: attemptSignal,
-      liveness,
-      label: 'OpenRouter',
-      classify: (input) => {
-        const requestId = openRouterRequestId(input.headers);
-        return classifyOpenRouterError({ ...input, requestUrl: apiUrl, ...(requestId ? { requestId } : {}) });
-      },
-    });
+    }, body, maxOutputTokens);
   }
 
   private async queryOpenRouterMultiTurn(
@@ -802,7 +774,6 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
     perAttemptTimeoutMs?: number,
     extraBody?: Record<string, unknown>,
     reasoningEffort?: OpenRouterReasoningEffort,
-    paidSendBudget?: PaidSendBudget,
   ): Promise<ProviderQueryResult> {
     const messages = this.conversationToOpenAIMessages(history);
     const totalChars = history.reduce((sum, m) => sum + m.content.length, 0);
@@ -816,41 +787,55 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       maxOutputTokens,
     });
 
-    const clientAttemptId = paidSendBudget?.clientAttemptId ?? randomUUID();
-    // The id of the response actually returned, for the cut-off warning.
+    let priorRequestId: string | null = null;
+    // The id of the response actually returned. priorRequestId keeps an earlier
+    // failed attempt's id for the retry-dedup header, so it would name the wrong
+    // request when the final response carries no id header.
     let finalRequestId: string | undefined;
 
-    // Decided once, so every attempt is bounded the way withRetry was told.
-    const streamed = streamsChatCompletion(apiUrl);
-    const liveness = streamed ? resolveStreamLiveness(perAttemptTimeoutMs, this.streamIdleTimeoutMs) : null;
     const data = await withRetry<OpenRouterResponse>(async (attemptSignal) => {
-      const exchange = await this.requestChatCompletion(
-        apiUrl, apiKey, model, fallbackModels, messages, siteUrl, appName, clientAttemptId, attemptSignal,
-        maxOutputTokens, liveness, plainText, extraBody, reasoningEffort,
-      );
-      const requestId = openRouterRequestId(exchange.headers);
-      finalRequestId = requestId;
-      const responseData = exchange.body as OpenRouterResponse;
+      let response: Response;
+      try {
+        response = await this.fetchChatCompletion(apiUrl, apiKey, model, fallbackModels, messages, siteUrl, appName, priorRequestId, attemptSignal, maxOutputTokens, plainText, extraBody, reasoningEffort);
+      } catch (networkError: unknown) {
+        const err = networkError instanceof Error ? networkError : new Error(String(networkError));
+        throw classifyOpenRouterError({ cause: err, requestUrl: apiUrl });
+      }
+
+      const requestId = response.headers.get('x-request-id') ?? response.headers.get('x-openrouter-request-id');
+      finalRequestId = requestId ?? undefined;
+      if (requestId) {
+        priorRequestId = requestId;
+      } else {
+        logger.debug('SDK', 'OpenRouter response missing request-id header; retry dedup is best-effort');
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw classifyOpenRouterError({
+          status: response.status,
+          bodyText: errorText,
+          headers: response.headers,
+          cause: new Error(`OpenRouter API error: ${response.status} - ${errorText}`),
+          ...(requestId ? { requestId } : {}),
+        });
+      }
+
+      const responseData = await response.json() as OpenRouterResponse;
 
       if (responseData.error) {
         // Per OpenRouter spec, errors can come in 200 responses too.
         throw classifyOpenRouterError({
-          status: exchange.status,
+          status: response.status,
           bodyText: JSON.stringify(responseData),
-          headers: exchange.headers,
+          headers: response.headers,
           cause: new Error(`OpenRouter API error: ${responseData.error.code} - ${responseData.error.message}`),
           ...(requestId ? { requestId } : {}),
         });
       }
 
       return responseData;
-    }, {
-      label: `OpenRouter ${model}`, abortSignal: signal, perAttemptTimeoutMs, paidSendBudget, clientAttemptId,
-      // A streamed request is bounded by its idle timeout and absolute cap, and
-      // may be resent once if it fails before any output.
-      ...(streamed ? { attemptDeadlineOwnedByCaller: true, retryBeforeOutput: true } : {}),
-      ...(signal ? { maxRetries: 0 } : {}), ...retryPolicyForPool(poolSize),
-    });
+    }, { label: `OpenRouter ${model}`, abortSignal: signal, perAttemptTimeoutMs, ...(signal ? { maxRetries: 0 } : {}), ...retryPolicyForPool(poolSize) });
 
     // A successful cmem-gateway response proves the delivered key is funded
     // again (resubscribed) — clear the trial-expiry fallback marker so
@@ -871,7 +856,6 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       logger.warn('SDK', 'OpenRouter reply was cut off at the output-token limit', {
         model: data.model ?? model,
         requestId: finalRequestId,
-        clientAttemptId,
         maxTokens: maxOutputTokens,
         outputTokens: data.usage?.completion_tokens,
         contentChars: content.length,
@@ -882,8 +866,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
       const error = new Error('OpenRouter returned no assistant text for the Telegram wrap-up');
       logger.error('TELEGRAM', error.message, {
         model: data.model ?? model,
-        requestId: finalRequestId,
-        clientAttemptId,
+        requestId: priorRequestId,
         finishReason: choice?.finish_reason,
         contentType: Array.isArray(message?.content) ? 'array' : typeof message?.content,
         hasReasoningContent: Boolean(message?.reasoning_content || message?.reasoning),
@@ -925,9 +908,7 @@ export class OpenRouterProvider extends OpenAICompatibleProvider<OpenRouterConfi
         outputTokens: realOutputTokens || 0,
         totalTokens: tokensUsed,
         ...(costUsd !== undefined ? { costUSD: costUsd.toFixed(6) } : {}),
-        messagesInContext: history.length,
-        requestId: finalRequestId,
-        clientAttemptId,
+        messagesInContext: history.length
       });
     }
 

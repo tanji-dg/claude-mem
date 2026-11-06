@@ -17,7 +17,6 @@ import type {
   ServerGenerationProvider,
   ServerGenerationResult,
 } from './shared/types.js';
-import { readCappedErrorBody } from '../../../shared/capped-error-body.js';
 
 export interface OpenRouterObservationProviderOptions {
   apiKey: string;
@@ -189,7 +188,7 @@ export class OpenRouterObservationProvider implements ServerGenerationProvider {
 
 async function safeReadBody(response: Response): Promise<string> {
   try {
-    return await readCappedErrorBody(response);
+    return await response.text();
   } catch (readError) {
     const err = readError instanceof Error ? readError : new Error(String(readError));
     logger.warn('SDK', 'Failed to read OpenRouter error response body', { provider: 'openrouter' }, err);
