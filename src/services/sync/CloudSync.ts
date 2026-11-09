@@ -1864,9 +1864,19 @@ export class CloudSync {
    */
   private rebuildSnapshotsFrozenUnderOtherE2EMode(): void {
     const sealed = isSyncE2EEnabled();
-    const mismatch = (path: string): string => sealed
-      ? `json_extract(${path}, '$.alg') IS NOT '${E2E_ALG}'`
-      : `json_extract(${path}, '$.alg') IS '${E2E_ALG}'`;
+    const mismatch = (path: string, guardedJson?: string): string => {
+      const test = sealed
+        ? `json_extract(${path}, '$.alg') IS NOT '${E2E_ALG}'`
+        : `json_extract(${path}, '$.alg') IS '${E2E_ALG}'`;
+      if (!guardedJson) return test;
+      // A corrupt row (invalid JSON, or a non-object `mutation` whose
+      // json_extract is unquoted text) must stay inert here, not raise
+      // "malformed JSON" and fail the whole flush. Nested CASE: SQLite does
+      // not guarantee short-circuit order for AND.
+      return `(CASE WHEN json_valid(${guardedJson}) THEN
+        CASE WHEN json_type(${guardedJson}, '$.mutation') = 'object' THEN ${test} ELSE 0 END
+        ELSE 0 END)`;
+    };
 
     const contentRows = this.db.prepare(`
       SELECT CAST(id AS TEXT) AS id, kind, origin_local_id
@@ -1878,7 +1888,7 @@ export class CloudSync {
     const mutations = this.db.prepare(`
       SELECT COUNT(*) AS n FROM sync_outbox
       WHERE canonical_body IS NOT NULL
-        AND ${mismatch("json_extract(canonical_body, '$.mutation')")}
+        AND ${mismatch("json_extract(canonical_body, '$.mutation')", "canonical_body")}
     `).get() as { n: number };
     if (contentRows.length === 0 && mutations.n === 0) return;
 
@@ -1896,7 +1906,7 @@ export class CloudSync {
       this.db.prepare(`
         UPDATE sync_outbox SET canonical_body = NULL, operation_sha256 = NULL
         WHERE canonical_body IS NOT NULL
-          AND ${mismatch("json_extract(canonical_body, '$.mutation')")}
+          AND ${mismatch("json_extract(canonical_body, '$.mutation')", "canonical_body")}
       `).run();
     });
     tx();

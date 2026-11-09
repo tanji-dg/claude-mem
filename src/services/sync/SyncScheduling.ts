@@ -17,6 +17,7 @@ export interface ContentScopeSql {
 // whose `mutation` is a string (json_extract would otherwise return unquoted
 // text that the next json_extract tries to parse). Nested CASE guards also
 // avoid relying on SQLite's evaluation order for AND on invalid JSON.
+// The E2E branch below (sealed mutation -> plaintext body) follows the same rule.
 export const PENDING_MUTATIONS_SQL = `(SELECT id, rev,
   CASE WHEN json_type(candidate, '$.fields') = 'object' AND CASE json_extract(candidate, '$.op')
     WHEN 'set_title' THEN json_type(candidate, '$.target') = 'object'
@@ -24,10 +25,13 @@ export const PENDING_MUTATIONS_SQL = `(SELECT id, rev,
     WHEN 'remap_project' THEN json_type(candidate, '$.where') = 'object'
     ELSE 0 END THEN candidate ELSE NULL END AS mutation
   FROM (SELECT id, CAST(rev AS TEXT) AS rev,
-    CASE WHEN canonical_body IS NOT NULL
-      AND NOT (json_valid(canonical_body) AND json_type(canonical_body, '$.mutation') = 'object'
-        AND json_extract(canonical_body, '$.mutation.alg') IS NOT NULL
-        AND json_type(canonical_body, '$.mutation.fields') IS NULL)
+    CASE WHEN canonical_body IS NOT NULL AND NOT (
+      CASE WHEN json_valid(canonical_body) THEN
+        CASE WHEN json_type(canonical_body, '$.mutation') = 'object'
+          THEN json_extract(canonical_body, '$.mutation.alg') IS NOT NULL
+            AND json_type(canonical_body, '$.mutation.fields') IS NULL
+          ELSE 0 END
+      ELSE 0 END)
     THEN CASE WHEN json_valid(canonical_body) THEN
       CASE WHEN json_type(canonical_body, '$.mutation') = 'object'
         THEN json_extract(canonical_body, '$.mutation') END END
